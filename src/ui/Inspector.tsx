@@ -351,8 +351,8 @@ export function Inspector() {
       <View style={[styles.sheet, { backgroundColor: c.inspBg }]}>
         <View style={styles.grabRow}>
           <View style={[styles.grab, { backgroundColor: c.raise }]} />
-          <Pressable onPress={() => select(null)} style={styles.close}>
-            <Text style={{ color: c.text2, fontSize: 16 }}>X</Text>
+          <Pressable onPress={() => select(null)} style={styles.close} accessibilityLabel="Close properties">
+            <Text style={{ color: c.text2, fontSize: 22, fontWeight: '600' }}>×</Text>
           </Pressable>
         </View>
         <ScrollView contentContainerStyle={{ padding: 16, gap: 6, paddingBottom: 40 }}>
@@ -368,26 +368,27 @@ const styles = StyleSheet.create({
   backdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.35)' },
   sheet: {
     maxHeight: '70%',
-    borderTopLeftRadius: 22,
-    borderTopRightRadius: 22,
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
   },
   grabRow: { alignItems: 'center', paddingTop: 10, paddingBottom: 4 },
   grab: { width: 40, height: 5, borderRadius: 3 },
-  close: { position: 'absolute', right: 16, top: 8, padding: 8 },
+  close: { position: 'absolute', right: 12, top: 4, width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
   nameInput: {
     flex: 1,
     borderWidth: 1,
     borderRadius: 12,
     paddingHorizontal: 12,
-    paddingVertical: 8,
+    paddingVertical: 10,
+    minHeight: 44,
     fontSize: 16,
     fontWeight: '700',
   },
   stepRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginVertical: 4 },
   stepBtn: {
-    width: 32,
-    height: 32,
-    borderRadius: 10,
+    width: 44,
+    height: 44,
+    borderRadius: 12,
     alignItems: 'center',
     justifyContent: 'center',
   },

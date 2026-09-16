@@ -81,9 +81,9 @@ export function Rail({
               },
             ]}
           >
-            <View style={[styles.pos, { backgroundColor: c.fill2 }]}>
-              <Text style={{ color: c.text, fontSize: 12, fontWeight: '700' }}>
-                {multiMode && isMulti ? 'Y' : i + 1}
+            <View style={[styles.pos, { backgroundColor: c.accentTint2 }]}>
+              <Text style={{ color: c.accentFg, fontSize: 13, fontWeight: '700' }}>
+                {multiMode && isMulti ? '✓' : i + 1}
               </Text>
             </View>
             <View style={{ flex: 1 }}>
@@ -129,20 +129,21 @@ const styles = StyleSheet.create({
     padding: 8,
     borderRadius: 14,
     borderWidth: 1,
-    minWidth: 160,
+    minWidth: 168,
+    minHeight: 52,
   },
   pos: {
-    width: 28,
-    height: 28,
-    borderRadius: 10,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
     alignItems: 'center',
     justifyContent: 'center',
   },
   tools: { flexDirection: 'row', gap: 4 },
   nudge: {
-    width: 28,
-    height: 28,
-    borderRadius: 8,
+    width: 36,
+    height: 36,
+    borderRadius: 10,
     alignItems: 'center',
     justifyContent: 'center',
   },

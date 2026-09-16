@@ -1,9 +1,4 @@
-import { Platform } from 'react-native'
-
-export const fiber = Platform.OS === 'web'
-  ? require('@react-three/fiber')
-  : require('@react-three/fiber/native')
-
-export const drei = Platform.OS === 'web'
-  ? require('@react-three/drei')
-  : require('@react-three/drei/native')
+/** R3F is not used on native. Kept so leftover web helpers fail loudly instead of loading fiber. */
+export function getFiber(): never {
+  throw new Error('react-three-fiber is not loaded in this app')
+}

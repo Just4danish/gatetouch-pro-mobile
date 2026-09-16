@@ -10,10 +10,13 @@
     "babel-preset-expo": "~57.0.0",
     "expo": "~57.0.23",
     "expo-asset": "~57.0.17",
+    "expo-blur": "~57.0.3",
     "expo-file-system": "~57.0.7",
     "expo-gl": "~57.0.2",
     "expo-haptics": "~57.0.3",
+    "expo-splash-screen": "~57.0.9",
     "expo-status-bar": "~57.0.1",
+    "expo-updates": "~57.0.22",
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "react-native": "0.86.3",
@@ -22,19 +25,25 @@
     "react-native-safe-area-context": "~5.7.0",
     "react-native-svg": "15.15.4",
     "react-native-web": "^0.21.2",
+    "react-native-worklets": "0.10.1",
     "three": "^0.186.0",
     "zustand": "^5.0.15"
   },
   "devDependencies": {
     "@types/react": "~19.2.2",
     "@types/three": "^0.186.0",
+    "expo-mcp": "~0.2.1",
     "typescript": "~6.0.3"
   },
   "scripts": {
     "start": "expo start",
+    "start:mcp": "node ./tools/start-with-mcp.js",
     "android": "expo start --android",
     "ios": "expo start --ios",
-    "web": "expo start --web"
+    "web": "expo start --web",
+    "typecheck": "tsc --noEmit",
+    "doctor": "npx expo-doctor"
   },
-  "private": true
+  "private": true,
+  "packageManager": "pnpm@12.4.2+sha512.08adc6613180275c7c9edada39dcf08c9c61ad4e7eaf330a4f3461f102b0f907423454d117f98e72d47fef0616070644d7bffc973a6a57f5090a6d7c368b07c9"
 }

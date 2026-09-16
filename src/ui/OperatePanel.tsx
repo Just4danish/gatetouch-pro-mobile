@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
+import Svg, { Circle } from 'react-native-svg'
 import { useCorridor } from '../store/corridor'
 import { colors } from '../theme/tokens'
 import { useTheme } from '../store/theme'
@@ -82,6 +83,31 @@ function SlideToConfirm({ label, onConfirm }: { label: string; onConfirm: () => 
   )
 }
 
+function CountdownRing({ frac, seconds, green, raise, card }: { frac: number; seconds: number; green: string; raise: string; card: string }) {
+  const r = 11
+  const c = 2 * Math.PI * r
+  return (
+    <View style={{ width: 30, height: 30, alignItems: 'center', justifyContent: 'center' }}>
+      <Svg width={30} height={30} style={StyleSheet.absoluteFill}>
+        <Circle cx={15} cy={15} r={r} stroke={raise} strokeWidth={4} fill={card} />
+        <Circle
+          cx={15}
+          cy={15}
+          r={r}
+          stroke={green}
+          strokeWidth={4}
+          fill="none"
+          strokeDasharray={`${c} ${c}`}
+          strokeDashoffset={c * (1 - Math.max(0, Math.min(1, frac)))}
+          rotation={-90}
+          origin="15,15"
+        />
+      </Svg>
+      <Text style={{ fontSize: 11, fontWeight: '700', color: green }}>{seconds}</Text>
+    </View>
+  )
+}
+
 export function OperatePanel() {
   const theme = useTheme((s) => s.theme)
   const c = colors(theme)
@@ -92,22 +118,41 @@ export function OperatePanel() {
   const closeAll = useCorridor((s) => s.closeAll)
   const emergencyRelease = useCorridor((s) => s.emergencyRelease)
   const select = useCorridor((s) => s.select)
+  const setMode = useCorridor((s) => s.setMode)
   const now = useLaneTicker()
 
   if (!lanes.length) {
     return (
-      <View style={u.panel}>
-        <Text style={u.empty}>No lanes yet. Switch to Build, add turnstiles and create lanes.</Text>
+      <View style={[u.panel, { gap: 12 }]}>
+        <Text style={{ color: c.text, fontWeight: '800', fontSize: 16, textAlign: 'center' }}>
+          No lanes yet
+        </Text>
+        <Text style={[u.empty, { borderStyle: 'dashed' }]}>
+          Switch to Build, add turnstiles, then tap Auto on the Lanes tab.
+        </Text>
+        <Pressable
+          style={u.primaryBtn}
+          testID="operate.empty.build"
+          accessibilityLabel="Switch to Build"
+          onPress={() => {
+            tap()
+            setMode('build')
+          }}
+        >
+          <Text style={u.primaryText}>Switch to Build</Text>
+        </Pressable>
       </View>
     )
   }
 
   return (
-    <ScrollView style={u.panel} contentContainerStyle={{ gap: 10, paddingBottom: 8 }}>
+    <ScrollView contentContainerStyle={[u.panel, { gap: 16 }]}>
       <View style={u.row}>
-        <Text style={[u.sectionTitle, { flex: 1 }]}>Tap a lane to open or close</Text>
+        <Text style={[u.sectionTitle, { flex: 1 }]}>Lanes</Text>
         <Pressable
           style={u.ghostBtn}
+          testID="operate.lanes.closeAll"
+          accessibilityLabel="Close all lanes"
           onPress={() => {
             thud()
             closeAll()
@@ -117,6 +162,8 @@ export function OperatePanel() {
         </Pressable>
         <Pressable
           style={u.ghostBtn}
+          testID="operate.lanes.openAll"
+          accessibilityLabel="Open all lanes"
           onPress={() => {
             whoosh()
             openAll()
@@ -131,16 +178,19 @@ export function OperatePanel() {
           const blocked = l.mode === 'locked' || l.mode === 'noentry'
           const remain =
             l.openedAt != null ? Math.max(0, l.holdSec * 1000 - (now - l.openedAt)) : null
+          const frac = remain != null ? remain / (l.holdSec * 1000) : 0
           return (
             <Pressable
               key={l.id}
               style={[
                 styles.opLane,
                 {
-                  borderColor: l.color,
-                  backgroundColor: l.open ? c.tintBlueBg : c.card,
+                  borderColor: blocked ? c.tintOrangeBd : l.open ? c.green : c.tintRedBd,
+                  backgroundColor: blocked ? c.tintOrangeBg : l.open ? 'rgba(48, 209, 88, 0.15)' : c.tintRedBg,
                 },
               ]}
+              testID={`operate.lane.${l.id}`}
+              accessibilityLabel={`Lane ${l.name}`}
               onPress={() => {
                 if (blocked) buzz()
                 else if (l.open) thud()
@@ -149,26 +199,33 @@ export function OperatePanel() {
               }}
               onLongPress={() => select({ kind: 'lane', id: l.id })}
             >
+              <View style={[styles.laneDot, { backgroundColor: l.color }]} />
               <View style={u.row}>
-                <Text style={{ color: c.text, fontWeight: '700', flex: 1 }}>
+                <Text style={{ color: c.text, fontWeight: '700', fontSize: 19, flex: 1 }}>
                   {l.name}
-                  {l.accessible ? ' A' : ''}
+                  {l.accessible ? <Text style={{ color: c.accentFg }}> ♿</Text> : ''}
                 </Text>
                 {remain != null && (
-                  <Text style={{ color: c.accentFg, fontWeight: '700' }}>{Math.ceil(remain / 1000)}s</Text>
+                  <CountdownRing
+                    frac={frac}
+                    seconds={Math.ceil(remain / 1000)}
+                    green={c.green}
+                    raise={c.raise}
+                    card={c.card}
+                  />
                 )}
               </View>
               <Text
                 style={{
-                  color: blocked ? c.redFg : l.open ? c.greenFg : c.text2,
-                  fontWeight: '800',
-                  fontSize: 16,
-                  marginTop: 4,
+                  color: blocked ? c.orangeFg : l.open ? c.greenFg : c.redFg,
+                  fontWeight: '700',
+                  fontSize: 15,
+                  letterSpacing: 0.8,
                 }}
               >
                 {blocked ? MODE_LABEL[l.mode].toUpperCase() : l.open ? 'OPEN' : 'CLOSED'}
               </Text>
-              <Text style={{ color: c.text3, fontSize: 11, marginTop: 2 }}>
+              <Text style={{ color: c.text2, fontSize: 12, marginTop: 4 }}>
                 {MODE_LABEL[l.mode]} ·{' '}
                 {l.direction === 'both' ? 'both ways' : l.direction === 'in' ? 'entry' : 'exit'} ·{' '}
                 {l.members.length}w
@@ -191,18 +248,28 @@ export function OperatePanel() {
 }
 
 const styles = StyleSheet.create({
-  grid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  grid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
   opLane: {
     width: '48%',
-    minWidth: 140,
+    minWidth: 160,
     flexGrow: 1,
-    padding: 12,
-    borderRadius: 16,
-    borderWidth: 2,
+    padding: 20,
+    borderRadius: 22,
+    borderWidth: 1,
+    minHeight: 108,
+    gap: 5,
+  },
+  laneDot: {
+    position: 'absolute',
+    top: 18,
+    right: 18,
+    width: 10,
+    height: 10,
+    borderRadius: 5,
   },
   slide: {
-    height: 52,
-    borderRadius: 26,
+    height: 56,
+    borderRadius: 28,
     borderWidth: 1,
     overflow: 'hidden',
     justifyContent: 'center',

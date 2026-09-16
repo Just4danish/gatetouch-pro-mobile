@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "expo": {
+      "type": "http",
+      "url": "https://mcp.expo.dev/mcp"
+    },
+    "agent-device": {
+      "command": "C:\\nvm4w\\nodejs\\agent-device.cmd",
+      "args": ["mcp"],
+      "env": {
+        "Path": "C:\\nvm4w\\nodejs;${env:Path}"
+      }
+    }
+  }
+}

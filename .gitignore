@@ -39,3 +39,11 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# Expo Go APK downloads
+Expo-Go-*.apk
+
+# agent-device / local verification artifacts (keep intentional docs shots)
+docs/artifacts/*.png
+!docs/artifacts/.gitkeep
+

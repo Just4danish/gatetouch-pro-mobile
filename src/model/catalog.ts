@@ -29,8 +29,8 @@ export interface UnitSpec {
   type: UnitType
   label: string
   short: string
-  /** Metro asset module id — use MODEL_ASSETS[type] with useGLTF */
-  glb: number
+  /** Metro asset key — see MODEL_ASSETS in UnitObject */
+  glb: UnitType
   subtitle: string
   bodyMm: number
   depthMm: number
@@ -38,13 +38,6 @@ export interface UnitSpec {
   wings: WingId[]
   /** wing overhang past each body face, un-flipped (mm) */
   reach: { left: number; right: number }
-}
-
-/** Expo asset modules for GLB models (Metro requires .glb in assetExts). */
-export const MODEL_ASSETS: Record<UnitType, number> = {
-  gla1: require('../../assets/models/gl_a1.glb'),
-  hg02_single: require('../../assets/models/hg02_single_unit.glb'),
-  hg02_center: require('../../assets/models/hg02_center_unit.glb'),
 }
 
 export const HG02_WING: WingClipMap = { closedTime: 0.4, openTime: 1.2, stroke: 0.8 }
@@ -55,7 +48,7 @@ export const CATALOG: Record<UnitType, UnitSpec> = {
     type: 'gla1',
     label: 'GL A1 — Swing gate',
     short: 'GL A1',
-    glb: MODEL_ASSETS.gla1,
+    glb: 'gla1',
     subtitle: 'Ø212 column · 909 mm arm',
     bodyMm: 212,
     depthMm: 212,
@@ -67,7 +60,7 @@ export const CATALOG: Record<UnitType, UnitSpec> = {
     type: 'hg02_single',
     label: 'HG 02 EU — Single',
     short: 'HG02 Single',
-    glb: MODEL_ASSETS.hg02_single,
+    glb: 'hg02_single',
     subtitle: '305 mm body · 1 wing',
     bodyMm: 305,
     depthMm: 1000,
@@ -79,7 +72,7 @@ export const CATALOG: Record<UnitType, UnitSpec> = {
     type: 'hg02_center',
     label: 'HG 02 EU — Center',
     short: 'HG02 Center',
-    glb: MODEL_ASSETS.hg02_center,
+    glb: 'hg02_center',
     subtitle: '305 mm body · 2 wings',
     bodyMm: 305,
     depthMm: 1000,

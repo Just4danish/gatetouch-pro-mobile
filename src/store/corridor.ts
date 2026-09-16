@@ -412,7 +412,6 @@ export const useCorridor = create<State>((set, get) => {
         return {
           units,
           lanes: coverOrphans(s.lanes, units),
-          sel: { kind: 'unit', id: unit.id },
         }
       }),
 

@@ -1,0 +1,49 @@
+---
+description: Expo / React Native mobile development workflow with agent-device verification
+alwaysApply: true
+---
+
+# Mobile Development Workflow
+
+When implementing or fixing an Expo/React Native screen:
+
+1. Read existing architecture first (`App.tsx`, `src/ui`, `src/store`, `src/theme`).
+2. Follow existing components, theme tokens, and design patterns.
+3. Implement the requested change with the smallest safe diff.
+4. Run TypeScript checks (`npx tsc --noEmit`) and fix introduced errors.
+5. Start or reload the application (`npm start` / `npm run android`, or Metro reload).
+6. Use **agent-device** when available for device automation.
+7. Navigate to the changed screen.
+8. Visually inspect the result (`agent-device screenshot`, optional `--overlay-refs`).
+9. Test important interactions (`snapshot -i`, `press` by `testID` / label / ref).
+10. Inspect console/runtime errors (RN overlays, `agent-device events`, Expo terminal logs).
+11. Correct any problems discovered.
+12. Retest before marking work complete.
+
+Do not consider UI work completed merely because the code compiles.
+
+For visual UI tasks, verify the actual rendered application whenever possible.
+
+Avoid introducing new libraries when an existing project library already solves the requirement.
+
+Do not upgrade Expo / React Native dependencies without a specific compatibility reason.
+
+Never expose API keys, passwords, access tokens, or secrets.
+
+## agent-device usage
+
+Use agent-device only for app/device automation tasks. Prefer:
+
+`open -> snapshot -i -> act (--settle) -> re-snapshot -> verify -> close`
+
+On this Windows machine, Android is the primary target. Open Expo Go with:
+
+```bash
+agent-device open host.exp.exponent "exp://127.0.0.1:8082" --platform android --foreground
+```
+
+Prefer stable selectors such as `id="app.mode.build"` over ephemeral `@eN` refs for durable flows.
+
+For logs/network/RN overlays: `agent-device help debugging` / `agent-device help react-native`.
+
+Do not probe with `--help` / `doctor` as routine prep unless setup is broken.

@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react'
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
+import Svg, { Path, Rect } from 'react-native-svg'
 import {
   CATALOG,
   ENVS,
@@ -21,6 +22,15 @@ import { tap } from '../lib/feedback'
 
 type Tab = 'layout' | 'lanes' | 'look'
 
+function GateGlyph({ color }: { color: string }) {
+  return (
+    <Svg width={32} height={32} viewBox="0 0 34 34">
+      <Rect x="20" y="6" width="7" height="22" rx="3.5" fill={color} opacity={0.9} />
+      <Path d="M20 12 L6 18 L6 24 L20 20 Z" fill={color} opacity={0.45} />
+    </Svg>
+  )
+}
+
 function PaletteCard({ type }: { type: UnitType }) {
   const theme = useTheme((s) => s.theme)
   const c = colors(theme)
@@ -38,9 +48,9 @@ function PaletteCard({ type }: { type: UnitType }) {
       style={[
         styles.palCard,
         {
-          backgroundColor: c.card,
-          borderColor: dragging ? c.accent : c.hair,
-          opacity: dragging ? 0.7 : 1,
+          backgroundColor: c.glass2,
+          borderColor: c.hair,
+          opacity: dragging ? 0.4 : 1,
         },
       ]}
       onPressIn={(e) => {
@@ -68,9 +78,14 @@ function PaletteCard({ type }: { type: UnitType }) {
         move(t.pageX, t.pageY)
       }}
     >
-      <Text style={{ color: c.text, fontWeight: '700', fontSize: 13 }}>{spec.short}</Text>
-      <Text style={{ color: c.text3, fontSize: 11 }}>{spec.subtitle}</Text>
-      <Text style={{ color: c.accentFg, fontSize: 10, marginTop: 4 }}>Tap or drag into world</Text>
+      <View style={[styles.glyph, { backgroundColor: c.accentTint }]}>
+        <GateGlyph color={c.accentFg} />
+      </View>
+      <Text style={{ color: c.text, fontWeight: '700', fontSize: 14 }}>{spec.short}</Text>
+      <Text style={{ color: c.text2, fontSize: 11 }} numberOfLines={1}>
+        {spec.subtitle}
+      </Text>
+      <Text style={{ color: c.accentFg, fontSize: 11, fontWeight: '600', marginTop: 6 }}>Tap or drag</Text>
     </Pressable>
   )
 }
@@ -125,12 +140,14 @@ export function BuildPanel({ onOpenLibrary }: { onOpenLibrary: () => void }) {
   }))
 
   return (
-    <ScrollView style={u.panel} contentContainerStyle={{ gap: 8, paddingBottom: 8 }}>
+    <ScrollView style={{ flexGrow: 0 }} contentContainerStyle={u.panel} nestedScrollEnabled>
       <View style={u.subtabs}>
         {(['layout', 'lanes', 'look'] as Tab[]).map((t) => (
           <Pressable
             key={t}
             style={[u.tabBtn, tab === t && u.tabBtnOn]}
+            testID={`build.tab.${t}`}
+            accessibilityLabel={`${t === 'layout' ? 'Layout' : t === 'lanes' ? 'Lanes' : 'Look'} tab`}
             onPress={() => {
               tap()
               setTab(t)
@@ -142,44 +159,56 @@ export function BuildPanel({ onOpenLibrary }: { onOpenLibrary: () => void }) {
           </Pressable>
         ))}
         <View style={u.spacer} />
-        <Pressable style={u.ghostBtn} onPress={onOpenLibrary}>
+        <Pressable
+          style={u.ghostBtn}
+          testID="build.corridors.open"
+          accessibilityLabel="Open corridors library"
+          onPress={onOpenLibrary}
+        >
           <Text style={u.ghostText}>Corridors</Text>
         </Pressable>
       </View>
 
       {tab === 'layout' && (
         <>
-          <View style={styles.palette}>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.palette}
+          >
             {UNIT_ORDER.map((t) => (
               <PaletteCard key={t} type={t} />
             ))}
-          </View>
-          <Text style={u.sectionTitle}>The line</Text>
-          <Text style={u.hint}>Tap to select · long-press for options · use arrows to reorder</Text>
-          <Rail
-            items={railItems}
-            selectedId={sel?.kind === 'unit' ? sel.id : null}
-            multi={multi}
-            multiMode={multiMode}
-            onSelect={(id) => select({ kind: 'unit', id })}
-            onToggleMulti={toggleMulti}
-            onReorder={reorder}
-            onNudge={nudgeUnit}
-            onHold={(id, x, y) => openContextMenu(id, x, y)}
-          />
-          <View style={u.wrap}>
-            <Pressable
-              style={[u.btn, multiMode && u.primaryBtn]}
-              onPress={() => {
-                tap()
-                setMultiMode(!multiMode)
-                clearMulti()
-              }}
-            >
-              <Text style={multiMode ? u.primaryText : u.btnText}>
-                {multiMode ? 'Done selecting' : 'Select multiple'}
+          </ScrollView>
+          {units.length > 0 && (
+            <>
+              <Text style={u.sectionTitle}>
+                Line <Text style={u.hint}> — drag to reorder</Text>
               </Text>
-            </Pressable>
+              <Rail
+                items={railItems}
+                selectedId={sel?.kind === 'unit' ? sel.id : null}
+                multi={multi}
+                multiMode={multiMode}
+                onSelect={(id) => select({ kind: 'unit', id })}
+                onToggleMulti={toggleMulti}
+                onReorder={reorder}
+                onNudge={nudgeUnit}
+                onHold={(id, x, y) => openContextMenu(id, x, y)}
+              />
+              <View style={u.wrap}>
+                <Pressable
+                  style={[u.btn, multiMode && u.primaryBtn]}
+                  onPress={() => {
+                    tap()
+                    setMultiMode(!multiMode)
+                    clearMulti()
+                  }}
+                >
+                  <Text style={multiMode ? u.primaryText : u.btnText}>
+                    {multiMode ? 'Done selecting' : 'Select multiple'}
+                  </Text>
+                </Pressable>
             {multiMode && (
               <>
                 <Pressable
@@ -202,6 +231,8 @@ export function BuildPanel({ onOpenLibrary }: { onOpenLibrary: () => void }) {
               <Text style={showDims ? u.primaryText : u.btnText}>Dimensions</Text>
             </Pressable>
           </View>
+            </>
+          )}
         </>
       )}
 
@@ -219,7 +250,7 @@ export function BuildPanel({ onOpenLibrary }: { onOpenLibrary: () => void }) {
               <Text style={u.primaryText}>Group selected ({selectedLaneIds.length})</Text>
             </Pressable>
           </View>
-          <Text style={u.hint}>Tap a lane to edit · tick two and Group to pair them</Text>
+          <Text style={u.hint}>Tap a lane to edit it · tick two and Group to pair them</Text>
           {lanes.length === 0 && <Text style={u.empty}>Add turnstiles, then tap Auto.</Text>}
           <View style={u.wrap}>
             {lanes.map((l) => {
@@ -230,30 +261,36 @@ export function BuildPanel({ onOpenLibrary }: { onOpenLibrary: () => void }) {
                   key={l.id}
                   style={[
                     styles.laneChip,
-                    { borderColor: l.color, backgroundColor: isSel ? c.accentTint : c.card },
+                    {
+                      borderColor: isSel ? c.accent : l.color,
+                      backgroundColor: c.glass2,
+                    },
                   ]}
                 >
                   <Pressable
-                    style={[styles.tick, { backgroundColor: c.fill2 }]}
+                    style={[styles.tick, { backgroundColor: isSel ? c.accent : c.fill2 }]}
                     onPress={() => {
                       tap()
                       toggleLaneSelected(l.id)
                     }}
                   >
-                    <Text style={{ color: c.text }}>{isSel ? 'Y' : ''}</Text>
+                    <Text style={{ color: isSel ? c.onAccent : c.text2, fontWeight: '700' }}>
+                      {isSel ? '✓' : ''}
+                    </Text>
                   </Pressable>
                   <Pressable
-                    style={{ flex: 1 }}
+                    style={{ flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8 }}
                     onPress={() => {
                       tap()
                       select({ kind: 'lane', id: l.id })
                     }}
                   >
-                    <Text style={{ color: c.text, fontWeight: '700' }}>
+                    <View style={[styles.dot, { backgroundColor: l.color }]} />
+                    <Text style={{ color: c.text, fontWeight: '600' }}>
                       {l.name}
-                      {l.accessible ? ' A' : ''}
+                      {l.accessible ? ' ♿' : ''}
                     </Text>
-                    <Text style={{ color: c.text3, fontSize: 11 }}>
+                    <Text style={{ color: c.text2, fontSize: 12 }}>
                       {l.members.length}w{clear != null ? ` · ${Math.round(clear)}mm` : ''}
                     </Text>
                   </Pressable>
@@ -324,6 +361,7 @@ export function BuildPanel({ onOpenLibrary }: { onOpenLibrary: () => void }) {
               </Pressable>
             ))}
           </View>
+          <Text style={u.hint}>Auto follows this device light or dark setting</Text>
 
           <Text style={u.label}>Environment</Text>
           <View style={u.wrap}>
@@ -341,7 +379,7 @@ export function BuildPanel({ onOpenLibrary }: { onOpenLibrary: () => void }) {
             ))}
           </View>
 
-          <Text style={u.label}>People (v1 stub)</Text>
+          <Text style={u.label}>People walking through</Text>
           <View style={u.wrap}>
             {(['off', 'few', 'busy'] as CrowdLevel[]).map((cl) => (
               <Pressable
@@ -356,7 +394,7 @@ export function BuildPanel({ onOpenLibrary }: { onOpenLibrary: () => void }) {
               </Pressable>
             ))}
           </View>
-          <Text style={u.hint}>Crowd characters are not loaded in this build.</Text>
+          <Text style={u.hint}>Characters walk the open lanes and follow each lane's direction.</Text>
         </>
       )}
     </ScrollView>
@@ -364,29 +402,39 @@ export function BuildPanel({ onOpenLibrary }: { onOpenLibrary: () => void }) {
 }
 
 const styles = StyleSheet.create({
-  palette: { flexDirection: 'row', gap: 8 },
+  palette: { flexDirection: 'row', gap: 10, paddingBottom: 4 },
   palCard: {
-    flex: 1,
-    padding: 10,
-    borderRadius: 14,
+    width: 136,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 18,
     borderWidth: 1,
-    minWidth: 100,
+    alignItems: 'flex-start',
+  },
+  glyph: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 6,
   },
   laneChip: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    padding: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
     borderRadius: 14,
-    borderWidth: 2,
-    minWidth: 140,
+    borderWidth: 1.5,
+    minWidth: 160,
   },
   tick: {
-    width: 28,
-    height: 28,
-    borderRadius: 8,
+    width: 44,
+    height: 44,
+    borderRadius: 12,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  dot: { width: 12, height: 12, borderRadius: 6 },
+  dot: { width: 10, height: 10, borderRadius: 5 },
 })

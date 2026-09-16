@@ -18,6 +18,7 @@ export interface ThemeColors {
   orange: string
   orangeFg: string
   glass: string
+  glass2: string
   panel: string
   menu: string
   sheetBg: string
@@ -29,6 +30,8 @@ export interface ThemeColors {
   fill2: string
   chrome: string
   thumb: string
+  thumb2: string
+  knob: string
   hair: string
   labelBg: string
   labelFg: string
@@ -62,18 +65,21 @@ export const DARK: ThemeColors = {
   redFg: '#ff453a',
   orange: '#ff9f0a',
   orangeFg: '#ff9f0a',
-  glass: 'rgba(28, 28, 32, 0.92)',
-  panel: 'rgba(28, 28, 32, 0.96)',
-  menu: 'rgba(34, 34, 38, 0.96)',
-  sheetBg: 'rgba(14, 15, 18, 0.96)',
-  inspBg: 'rgba(24, 24, 28, 0.96)',
-  card: 'rgba(18, 20, 24, 0.96)',
-  surface: 'rgba(255, 255, 255, 0.06)',
+  glass: 'rgba(28, 28, 32, 0.72)',
+  glass2: 'rgba(255, 255, 255, 0.06)',
+  panel: 'rgba(28, 28, 32, 0.9)',
+  menu: 'rgba(34, 34, 38, 0.94)',
+  sheetBg: '#0e0f12',
+  inspBg: '#18181c',
+  card: 'rgba(18, 20, 24, 0.92)',
+  surface: 'rgba(255, 255, 255, 0.04)',
   raise: 'rgba(255, 255, 255, 0.16)',
   raise2: 'rgba(255, 255, 255, 0.28)',
   fill2: 'rgba(118, 118, 128, 0.2)',
-  chrome: 'rgba(44, 44, 50, 0.9)',
+  chrome: 'rgba(44, 44, 50, 0.82)',
   thumb: 'rgba(120, 120, 128, 0.55)',
+  thumb2: 'rgba(120, 120, 128, 0.5)',
+  knob: '#fff',
   hair: 'rgba(255, 255, 255, 0.09)',
   labelBg: 'rgba(10, 12, 16, 0.88)',
   labelFg: '#cfe3ff',
@@ -107,18 +113,21 @@ export const LIGHT: ThemeColors = {
   redFg: '#c4271d',
   orange: '#ff9500',
   orangeFg: '#8f5100',
-  glass: 'rgba(255, 255, 255, 0.92)',
-  panel: 'rgba(255, 255, 255, 0.96)',
-  menu: 'rgba(255, 255, 255, 0.98)',
-  sheetBg: 'rgba(245, 246, 249, 0.98)',
-  inspBg: 'rgba(252, 252, 253, 0.98)',
-  card: 'rgba(255, 255, 255, 0.98)',
-  surface: 'rgba(0, 0, 0, 0.04)',
+  glass: 'rgba(255, 255, 255, 0.85)',
+  glass2: 'rgba(0, 0, 0, 0.05)',
+  panel: 'rgba(255, 255, 255, 0.92)',
+  menu: 'rgba(255, 255, 255, 0.96)',
+  sheetBg: '#f5f6f9',
+  inspBg: '#fcfcfd',
+  card: 'rgba(255, 255, 255, 0.96)',
+  surface: 'rgba(0, 0, 0, 0.035)',
   raise: 'rgba(0, 0, 0, 0.12)',
   raise2: 'rgba(0, 0, 0, 0.22)',
   fill2: 'rgba(118, 118, 128, 0.1)',
-  chrome: 'rgba(252, 252, 253, 0.94)',
+  chrome: 'rgba(252, 252, 253, 0.9)',
   thumb: '#ffffff',
+  thumb2: '#ffffff',
+  knob: '#fff',
   hair: 'rgba(0, 0, 0, 0.12)',
   labelBg: 'rgba(255, 255, 255, 0.92)',
   labelFg: '#0f4c92',

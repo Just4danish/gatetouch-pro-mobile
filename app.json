@@ -12,7 +12,7 @@
     },
     "android": {
       "adaptiveIcon": {
-        "backgroundColor": "#0a0b0e",
+        "backgroundColor": "#0e141c",
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
@@ -24,7 +24,27 @@
     },
     "plugins": [
       "expo-asset",
-      "expo-status-bar"
-    ]
+      "expo-status-bar",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-icon.png",
+          "resizeMode": "contain",
+          "backgroundColor": "#0e141c"
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "e808b486-b36c-4919-aa61-0e134791e936"
+      }
+    },
+    "owner": "just4danish",
+    "runtimeVersion": {
+      "policy": "sdkVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/e808b486-b36c-4919-aa61-0e134791e936"
+    }
   }
 }

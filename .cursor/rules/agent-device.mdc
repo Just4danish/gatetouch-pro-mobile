@@ -1,0 +1,25 @@
+---
+description: Use agent-device for Android app and device automation
+alwaysApply: true
+---
+
+# agent-device
+
+Use agent-device only for app/device automation tasks.
+
+For a normal app-driving task, start immediately. Do not probe first with `--help`, `--version`, `devices`, `appstate`, `snapshot`, or `screenshot`; open the requested app in the foreground and continue from its initial interactive snapshot.
+
+Specialized topics (only when needed):
+
+- TV / Fire TV / Vega: `agent-device help tv`
+- Exploratory QA: `agent-device help dogfood`
+- Logs / network / traces / runtime failures: `agent-device help debugging`
+- React component trees / props / slow renders: `agent-device help react-devtools`
+- JS heap / CDP: `agent-device help cdp`
+- React Native overlays / Metro: `agent-device help react-native`
+
+Prefer MCP tools or the CLI. If `agent-device` is missing from PATH, use the absolute binary under `C:\nvm4w\nodejs\`.
+
+Prefer `open -> snapshot -i -> act -> re-snapshot -> verify -> close`. Keep mutating commands serial within one session.
+
+This project package id for Expo Go is `host.exp.exponent`. Prefer `testID` selectors documented in `docs/AI_MOBILE_DEVELOPMENT.md`.
