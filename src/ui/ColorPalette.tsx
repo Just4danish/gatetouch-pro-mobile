@@ -78,7 +78,7 @@ export function ColorPalette({ value, onChange, onClear, clearLabel }: Props) {
       {onClear && (
         <Pressable onPress={onClear}>
           <Text style={{ color: c.accentFg, fontSize: 13, marginTop: 4 }}>
-            {clearLabel ?? 'Use corridor default'}
+            {clearLabel ?? 'Use installation default'}
           </Text>
         </Pressable>
       )}

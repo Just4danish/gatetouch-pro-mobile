@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
+import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import Svg, { Circle } from 'react-native-svg'
 import { useCorridor } from '../store/corridor'
 import { colors } from '../theme/tokens'
@@ -120,6 +120,7 @@ export function OperatePanel() {
   const select = useCorridor((s) => s.select)
   const setMode = useCorridor((s) => s.setMode)
   const now = useLaneTicker()
+  const [confirmEmergency, setConfirmEmergency] = useState(false)
 
   if (!lanes.length) {
     return (
@@ -128,7 +129,7 @@ export function OperatePanel() {
           No lanes yet
         </Text>
         <Text style={[u.empty, { borderStyle: 'dashed' }]}>
-          Switch to Build, add turnstiles, then tap Auto on the Lanes tab.
+          Switch to Build, create a lane group, then place turnstile equipment. Lanes are created automatically.
         </Text>
         <Pressable
           style={u.primaryBtn}
@@ -190,7 +191,7 @@ export function OperatePanel() {
                 },
               ]}
               testID={`operate.lane.${l.id}`}
-              accessibilityLabel={`Lane ${l.name}`}
+              accessibilityLabel={l.name}
               onPress={() => {
                 if (blocked) buzz()
                 else if (l.open) thud()
@@ -227,22 +228,51 @@ export function OperatePanel() {
               </Text>
               <Text style={{ color: c.text2, fontSize: 12, marginTop: 4 }}>
                 {MODE_LABEL[l.mode]} ·{' '}
-                {l.direction === 'both' ? 'both ways' : l.direction === 'in' ? 'entry' : 'exit'} ·{' '}
-                {l.members.length}w
+                {l.direction === 'both' ? '↔ bidirectional' : l.direction === 'in' ? 'Entry →' : '← Exit'}
               </Text>
             </Pressable>
           )
         })}
       </View>
 
-      <SlideToConfirm
-        label="Slide to release all lanes — emergency"
-        onConfirm={() => {
-          chime()
+      <Pressable
+        style={[u.dangerBtn, { alignSelf: 'stretch', minHeight: 48 }]}
+        testID="operate.emergency"
+        accessibilityLabel="Emergency release"
+        onPress={() => {
           tap()
-          emergencyRelease()
+          setConfirmEmergency(true)
         }}
-      />
+      >
+        <Text style={u.dangerText}>Emergency release…</Text>
+      </Pressable>
+
+      <Modal transparent visible={confirmEmergency} animationType="fade" onRequestClose={() => setConfirmEmergency(false)}>
+        <Pressable style={styles.emDim} onPress={() => setConfirmEmergency(false)}>
+          <View style={[styles.emCard, { backgroundColor: c.sheetBg, borderColor: c.hair }]}>
+            <Text style={{ color: c.text, fontWeight: '800', fontSize: 18 }}>Release all lanes?</Text>
+            <Text style={{ color: c.text2, marginTop: 8, lineHeight: 20 }}>
+              Every lane will open and switch to free passage. This cannot be undone from Operate.
+            </Text>
+            <View style={{ flexDirection: 'row', gap: 10, marginTop: 18 }}>
+              <Pressable style={u.btn} onPress={() => setConfirmEmergency(false)}>
+                <Text style={u.btnText}>Cancel</Text>
+              </Pressable>
+              <Pressable
+                style={u.dangerBtn}
+                testID="operate.emergency.confirm"
+                onPress={() => {
+                  chime()
+                  emergencyRelease()
+                  setConfirmEmergency(false)
+                }}
+              >
+                <Text style={u.dangerText}>Confirm release</Text>
+              </Pressable>
+            </View>
+          </View>
+        </Pressable>
+      </Modal>
     </ScrollView>
   )
 }
@@ -254,7 +284,7 @@ const styles = StyleSheet.create({
     minWidth: 160,
     flexGrow: 1,
     padding: 20,
-    borderRadius: 22,
+    borderRadius: 14,
     borderWidth: 1,
     minHeight: 108,
     gap: 5,
@@ -295,5 +325,19 @@ const styles = StyleSheet.create({
     borderRadius: 22,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  emDim: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 24,
+  },
+  emCard: {
+    width: '100%',
+    maxWidth: 420,
+    padding: 20,
+    borderRadius: 16,
+    borderWidth: StyleSheet.hairlineWidth,
   },
 })

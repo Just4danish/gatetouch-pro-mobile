@@ -2,6 +2,9 @@ import { Asset } from 'expo-asset'
 import { File } from 'expo-file-system'
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
+import { patchThreeShaders, stripPhysicalMaterials } from './fixThreeShaders'
+
+patchThreeShaders()
 
 const cache = new Map<number, Promise<{ scene: THREE.Group; animations: THREE.AnimationClip[] }>>()
 
@@ -10,7 +13,10 @@ function parseGltf(data: ArrayBuffer) {
     new GLTFLoader().parse(
       data,
       '',
-      (gltf) => resolve({ scene: gltf.scene, animations: gltf.animations ?? [] }),
+      (gltf) => {
+        stripPhysicalMaterials(gltf.scene)
+        resolve({ scene: gltf.scene, animations: gltf.animations ?? [] })
+      },
       reject,
     )
   })
@@ -28,6 +34,7 @@ export function loadGltf(moduleId: number) {
         return await parseGltf(await new File(uri).arrayBuffer())
       } catch {
         const gltf = await new GLTFLoader().loadAsync(uri)
+        stripPhysicalMaterials(gltf.scene)
         return { scene: gltf.scene, animations: gltf.animations ?? [] }
       }
     })()

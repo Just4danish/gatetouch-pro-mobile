@@ -1,6 +1,6 @@
 import { Image, Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
-import { CATALOG, UNIT_ORDER } from '../model/catalog'
+import { TURNSTILE_MODELS } from '../model/products'
 import { colors } from '../theme/tokens'
 import { useTheme } from '../store/theme'
 import { makeUiStyles } from './uiStyles'
@@ -37,45 +37,52 @@ export function Help({ open, onClose }: { open: boolean; onClose: () => void }) 
         </View>
         <ScrollView contentContainerStyle={{ padding: 16, gap: 14, paddingBottom: 48 }}>
           <Text style={{ color: c.text, fontSize: 16, lineHeight: 24 }}>
-            GateTouch Pro has two jobs. <Text style={{ fontWeight: '800' }}>Build</Text> lays out a row of
-            turnstiles. <Text style={{ fontWeight: '800' }}>Operate</Text> opens and closes lanes.
+            GateTouch Pro configures a real turnstile <Text style={{ fontWeight: '800' }}>installation</Text>.{' '}
+            <Text style={{ fontWeight: '800' }}>Build</Text> creates lane groups and places equipment.{' '}
+            <Text style={{ fontWeight: '800' }}>Operate</Text> opens and closes lanes.
           </Text>
 
           <Text style={u.label}>Quick start</Text>
           <Text style={{ color: c.text2, lineHeight: 22 }}>
-            1. Open Corridors and pick a template{'\n'}
-            2. Tap models in Layout to add more{'\n'}
-            3. On Lanes, tap Auto, then edit a lane{'\n'}
-            4. Switch to Operate and tap a lane to open it
+            1. Create a Lane Group, then open it{'\n'}
+            2. Keep CAME selected and tap Next{'\n'}
+            3. Tap a model, then Add to the group{'\n'}
+            4. Select two units to set Clear Width{'\n'}
+            5. Switch to Operate and tap a lane
           </Text>
 
           <Image source={HELP_IMGS.build} style={styles.fig} resizeMode="cover" />
-          <Text style={u.hint}>Build: 3D world above, tools docked below.</Text>
+          <Text style={u.hint}>Build: 3D above, wizard below — lane groups, then manufacturer, then models.</Text>
 
-          <Text style={u.label}>Catalogue</Text>
-          {UNIT_ORDER.map((t) => (
-            <View key={t} style={[styles.row, { borderColor: c.hair }]}>
-              <Text style={{ color: c.text, fontWeight: '700' }}>{CATALOG[t].short}</Text>
-              <Text style={{ color: c.text3, flex: 1, textAlign: 'right' }}>{CATALOG[t].subtitle}</Text>
+          <Text style={u.label}>CAME models</Text>
+          {TURNSTILE_MODELS.map((m) => (
+            <View key={m.id} style={[styles.row, { borderColor: c.hair }]}>
+              <Text style={{ color: c.text, fontWeight: '700' }}>{m.modelCode}</Text>
+              <Text style={{ color: c.text3, flex: 1, textAlign: 'right' }}>{m.name}</Text>
             </View>
           ))}
 
           <Image source={HELP_IMGS.lanes} style={styles.fig} resizeMode="cover" />
-          <Text style={u.hint}>Lanes group wings. Tick two and Group to pair facing arms.</Text>
+          <Text style={u.hint}>Lanes are created automatically between neighbouring turnstile units.</Text>
 
           <Image source={HELP_IMGS.operate} style={styles.fig} resizeMode="cover" />
-          <Text style={u.hint}>Operate: tap to open or close. Slide for emergency release.</Text>
+          <Text style={u.hint}>Operate: tap a lane card to open or close. Emergency release asks for confirmation.</Text>
 
           <Image source={HELP_IMGS.library} style={styles.fig} resizeMode="cover" />
-          <Text style={u.hint}>Corridors keeps templates and your saved layouts on this device.</Text>
+          <Text style={u.hint}>Installation Library loads from SQLite on this device. Save from Build after placing models.</Text>
 
           <Text style={u.label}>Gestures</Text>
           <Text style={{ color: c.text2, lineHeight: 22 }}>
-            · Drag one finger — orbit{'\n'}
-            · Drag two fingers — pan{'\n'}
+            Touch{'\n'}
+            · One finger drag — orbit{'\n'}
+            · Two finger drag — pan{'\n'}
             · Pinch — zoom{'\n'}
+            Mouse{'\n'}
+            · Left-drag — orbit{'\n'}
+            · Middle- or right-drag — pan{'\n'}
+            · Wheel — zoom{'\n'}
             · Tap a unit — properties{'\n'}
-            · Long-press a unit — Flip, Duplicate, Remove
+            · Long-press a unit — Flip, Duplicate, Select Multiple, Remove
           </Text>
         </ScrollView>
       </SafeAreaView>

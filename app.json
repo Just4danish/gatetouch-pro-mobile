@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "gatetouchpro",
+    "name": "GatetouchPro",
     "slug": "gatetouchpro",
     "version": "1.0.0",
     "orientation": "default",
@@ -8,9 +8,11 @@
     "scheme": "gatetouchpro",
     "userInterfaceStyle": "automatic",
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.just4danish.gatetouchpro"
     },
     "android": {
+      "package": "com.just4danish.gatetouchpro",
       "adaptiveIcon": {
         "backgroundColor": "#0e141c",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -32,7 +34,8 @@
           "resizeMode": "contain",
           "backgroundColor": "#0e141c"
         }
-      ]
+      ],
+      "expo-sqlite"
     ],
     "extra": {
       "eas": {

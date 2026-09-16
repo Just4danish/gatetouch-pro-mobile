@@ -1,5 +1,5 @@
 {
-  "name": "gatetouchpro",
+  "name": "GatetouchPro",
   "version": "1.0.0",
   "main": "index.ts",
   "dependencies": {
@@ -15,6 +15,7 @@
     "expo-gl": "~57.0.2",
     "expo-haptics": "~57.0.3",
     "expo-splash-screen": "~57.0.9",
+    "expo-sqlite": "~57.0.3",
     "expo-status-bar": "~57.0.1",
     "expo-updates": "~57.0.22",
     "react": "19.2.3",
@@ -42,6 +43,7 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
+    "test": "npx --yes tsx src/model/installation.test.ts",
     "doctor": "npx expo-doctor"
   },
   "private": true,

@@ -1,440 +1,611 @@
-import { useRef, useState } from 'react'
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
-import Svg, { Path, Rect } from 'react-native-svg'
+import { useState } from 'react'
+import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import {
-  CATALOG,
-  ENVS,
-  ENV_ORDER,
-  FINISHES,
-  FINISH_ORDER,
-  GLASSES,
-  GLASS_ORDER,
-  UNIT_ORDER,
-  type UnitType,
-} from '../model/catalog'
-import { laneClearMm, useCorridor, useDrag, type CrowdLevel } from '../store/corridor'
-import { useTheme, type ThemePref } from '../store/theme'
-import { colors } from '../theme/tokens'
-import { Rail, type RailItem } from './Rail'
-import { ColorPalette } from './ColorPalette'
+  categoryLabel,
+  enabledManufacturers,
+  formatDimsMm,
+  modelsForManufacturer,
+  type ManufacturerId,
+  type TurnstileModel,
+} from '../model/products'
+import { formatClearCm, cmToMm, groupSummary } from '../model/installation'
+import { CATALOG } from '../model/catalog'
+import { canMergeLanes, laneClearMm, mergePartner, useCorridor } from '../store/corridor'
+import { useTheme } from '../store/theme'
+import { colors, type ThemeColors } from '../theme/tokens'
 import { makeUiStyles } from './uiStyles'
-import { tap } from '../lib/feedback'
+import { chime, tap } from '../lib/feedback'
+import type { UnitType } from '../model/catalog'
 
-type Tab = 'layout' | 'lanes' | 'look'
+type WizardStep = 'groups' | 'manufacturer' | 'models' | 'adjust'
 
-function GateGlyph({ color }: { color: string }) {
-  return (
-    <Svg width={32} height={32} viewBox="0 0 34 34">
-      <Rect x="20" y="6" width="7" height="22" rx="3.5" fill={color} opacity={0.9} />
-      <Path d="M20 12 L6 18 L6 24 L20 20 Z" fill={color} opacity={0.45} />
-    </Svg>
-  )
-}
+type Crumb = { label: string; onPress?: () => void }
 
-function PaletteCard({ type }: { type: UnitType }) {
-  const theme = useTheme((s) => s.theme)
-  const c = colors(theme)
-  const start = useDrag((s) => s.start)
-  const move = useDrag((s) => s.move)
-  const clear = useDrag((s) => s.clear)
-  const dragging = useDrag((s) => s.type === type)
-  const insertUnit = useCorridor((s) => s.insertUnit)
-  const origin = useRef<{ x: number; y: number } | null>(null)
-  const moved = useRef(false)
-  const spec = CATALOG[type]
-
-  return (
-    <Pressable
-      style={[
-        styles.palCard,
-        {
-          backgroundColor: c.glass2,
-          borderColor: c.hair,
-          opacity: dragging ? 0.4 : 1,
-        },
-      ]}
-      onPressIn={(e) => {
-        const { pageX, pageY } = e.nativeEvent
-        origin.current = { x: pageX, y: pageY }
-        moved.current = false
-        start(type, pageX, pageY)
-      }}
-      onPressOut={() => {
-        if (!origin.current) return
-        const idx = useDrag.getState().index
-        tap()
-        if (!moved.current) insertUnit(type)
-        else if (idx != null) insertUnit(type, idx)
-        clear()
-        origin.current = null
-      }}
-      onTouchMove={(e) => {
-        if (!origin.current) return
-        const t = e.nativeEvent.touches[0]
-        if (!t) return
-        if (!moved.current && Math.hypot(t.pageX - origin.current.x, t.pageY - origin.current.y) > 8) {
-          moved.current = true
-        }
-        move(t.pageX, t.pageY)
-      }}
-    >
-      <View style={[styles.glyph, { backgroundColor: c.accentTint }]}>
-        <GateGlyph color={c.accentFg} />
-      </View>
-      <Text style={{ color: c.text, fontWeight: '700', fontSize: 14 }}>{spec.short}</Text>
-      <Text style={{ color: c.text2, fontSize: 11 }} numberOfLines={1}>
-        {spec.subtitle}
-      </Text>
-      <Text style={{ color: c.accentFg, fontSize: 11, fontWeight: '600', marginTop: 6 }}>Tap or drag</Text>
-    </Pressable>
-  )
-}
-
-export function BuildPanel({ onOpenLibrary }: { onOpenLibrary: () => void }) {
-  const [tab, setTab] = useState<Tab>('layout')
-  const [multiMode, setMultiMode] = useState(false)
+export function BuildPanel() {
   const theme = useTheme((s) => s.theme)
   const c = colors(theme)
   const u = makeUiStyles(c)
 
   const units = useCorridor((s) => s.units)
   const lanes = useCorridor((s) => s.lanes)
-  const gaps = useCorridor((s) => s.gaps)
-  const sel = useCorridor((s) => s.sel)
-  const multi = useCorridor((s) => s.multi)
-  const selectedLaneIds = useCorridor((s) => s.selectedLaneIds)
+  const laneGroups = useCorridor((s) => s.laneGroups)
+  const activeGroupId = useCorridor((s) => s.activeGroupId)
 
+  const createLaneGroup = useCorridor((s) => s.createLaneGroup)
+  const selectLaneGroup = useCorridor((s) => s.selectLaneGroup)
+  const renameLaneGroup = useCorridor((s) => s.renameLaneGroup)
+  const duplicateLaneGroup = useCorridor((s) => s.duplicateLaneGroup)
+  const deleteLaneGroup = useCorridor((s) => s.deleteLaneGroup)
+  const insertUnit = useCorridor((s) => s.insertUnit)
+  const fitSelection = useCorridor((s) => s.fitSelection)
   const select = useCorridor((s) => s.select)
-  const toggleMulti = useCorridor((s) => s.toggleMulti)
-  const clearMulti = useCorridor((s) => s.clearMulti)
-  const reorder = useCorridor((s) => s.reorder)
-  const nudgeUnit = useCorridor((s) => s.nudgeUnit)
-  const removeMany = useCorridor((s) => s.removeMany)
-  const duplicateMany = useCorridor((s) => s.duplicateMany)
-  const openContextMenu = useCorridor((s) => s.openContextMenu)
+  const saveToLibrary = useCorridor((s) => s.saveToLibrary)
 
-  const autoLanes = useCorridor((s) => s.autoLanes)
-  const toggleLaneSelected = useCorridor((s) => s.toggleLaneSelected)
-  const mergeSelectedLanes = useCorridor((s) => s.mergeSelectedLanes)
+  const makers = enabledManufacturers()
+  const [step, setStep] = useState<WizardStep>('groups')
+  const [makerId, setMakerId] = useState<ManufacturerId>(makers[0]?.id ?? 'came')
+  const [pendingModel, setPendingModel] = useState<UnitType | null>(null)
+  const [savedNote, setSavedNote] = useState<string | null>(null)
 
-  const led = useCorridor((s) => s.led)
-  const setLed = useCorridor((s) => s.setLed)
-  const finish = useCorridor((s) => s.finish)
-  const glass = useCorridor((s) => s.glass)
-  const setFinish = useCorridor((s) => s.setFinish)
-  const setGlass = useCorridor((s) => s.setGlass)
-  const env = useCorridor((s) => s.env)
-  const setEnv = useCorridor((s) => s.setEnv)
-  const showDims = useCorridor((s) => s.showDims)
-  const toggleDims = useCorridor((s) => s.toggleDims)
-  const crowd = useCorridor((s) => s.crowd)
-  const setCrowd = useCorridor((s) => s.setCrowd)
-  const themePref = useTheme((s) => s.pref)
-  const setThemePref = useTheme((s) => s.setPref)
+  const models = modelsForManufacturer(makerId)
+  const active = laneGroups.find((g) => g.id === activeGroupId)
+  const selectedMaker = makers.find((m) => m.id === makerId) ?? makers[0]
+  const groupUnitCount = active ? units.filter((x) => x.groupId === active.id).length : 0
+  const canSave = units.length > 0
 
-  const railItems: RailItem[] = units.map((unit) => ({
-    id: unit.id,
-    label: CATALOG[unit.type].short,
-    sub: `${CATALOG[unit.type].bodyMm} mm`,
-    flipped: unit.flipped,
-  }))
+  const saveInstallation = () => {
+    if (!canSave) return
+    tap()
+    chime()
+    saveToLibrary()
+    setSavedNote('Saved on this device')
+  }
 
-  return (
-    <ScrollView style={{ flexGrow: 0 }} contentContainerStyle={u.panel} nestedScrollEnabled>
-      <View style={u.subtabs}>
-        {(['layout', 'lanes', 'look'] as Tab[]).map((t) => (
-          <Pressable
-            key={t}
-            style={[u.tabBtn, tab === t && u.tabBtnOn]}
-            testID={`build.tab.${t}`}
-            accessibilityLabel={`${t === 'layout' ? 'Layout' : t === 'lanes' ? 'Lanes' : 'Look'} tab`}
-            onPress={() => {
-              tap()
-              setTab(t)
-            }}
-          >
-            <Text style={[u.tabText, tab === t && u.tabTextOn]}>
-              {t === 'layout' ? 'Layout' : t === 'lanes' ? 'Lanes' : 'Look'}
-            </Text>
-          </Pressable>
-        ))}
-        <View style={u.spacer} />
+  const openGroup = (id: string) => {
+    tap()
+    selectLaneGroup(id)
+    select(null)
+    fitSelection()
+    setPendingModel(null)
+    setMakerId(makers[0]?.id ?? 'came')
+    setSavedNote(null)
+    setStep('manufacturer')
+  }
+
+  const goGroups = () => {
+    tap()
+    setPendingModel(null)
+    setStep('groups')
+  }
+
+  const goManufacturer = () => {
+    tap()
+    setPendingModel(null)
+    setStep('manufacturer')
+  }
+
+  const openAdjust = (id: string) => {
+    tap()
+    selectLaneGroup(id)
+    select(null)
+    setStep('adjust')
+  }
+
+  if (step === 'groups') {
+    return (
+      <View style={styles.page}>
+        <Crumbs items={[{ label: 'Lane groups' }]} c={c} />
+        <Text style={[styles.hint, { color: c.text2 }]}>Create a group, then open it to place turnstiles.</Text>
+
         <Pressable
-          style={u.ghostBtn}
-          testID="build.corridors.open"
-          accessibilityLabel="Open corridors library"
-          onPress={onOpenLibrary}
+          style={[u.primaryBtn, { alignSelf: 'flex-start', marginTop: 12 }]}
+          testID="build.groups.create"
+          accessibilityLabel="Create Lane Group"
+          onPress={() => {
+            tap()
+            createLaneGroup()
+          }}
         >
-          <Text style={u.ghostText}>Corridors</Text>
+          <Text style={u.primaryText}>Create Lane Group</Text>
         </Pressable>
-      </View>
 
-      {tab === 'layout' && (
-        <>
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.palette}
-          >
-            {UNIT_ORDER.map((t) => (
-              <PaletteCard key={t} type={t} />
-            ))}
-          </ScrollView>
-          {units.length > 0 && (
-            <>
-              <Text style={u.sectionTitle}>
-                Line <Text style={u.hint}> — drag to reorder</Text>
-              </Text>
-              <Rail
-                items={railItems}
-                selectedId={sel?.kind === 'unit' ? sel.id : null}
-                multi={multi}
-                multiMode={multiMode}
-                onSelect={(id) => select({ kind: 'unit', id })}
-                onToggleMulti={toggleMulti}
-                onReorder={reorder}
-                onNudge={nudgeUnit}
-                onHold={(id, x, y) => openContextMenu(id, x, y)}
-              />
-              <View style={u.wrap}>
-                <Pressable
-                  style={[u.btn, multiMode && u.primaryBtn]}
-                  onPress={() => {
-                    tap()
-                    setMultiMode(!multiMode)
-                    clearMulti()
-                  }}
-                >
-                  <Text style={multiMode ? u.primaryText : u.btnText}>
-                    {multiMode ? 'Done selecting' : 'Select multiple'}
-                  </Text>
-                </Pressable>
-            {multiMode && (
-              <>
-                <Pressable
-                  style={[u.btn, !multi.length && u.btnDisabled]}
-                  disabled={!multi.length}
-                  onPress={() => duplicateMany(multi)}
-                >
-                  <Text style={u.btnText}>Duplicate ({multi.length})</Text>
-                </Pressable>
-                <Pressable
-                  style={[u.dangerBtn, !multi.length && u.btnDisabled]}
-                  disabled={!multi.length}
-                  onPress={() => removeMany(multi)}
-                >
-                  <Text style={u.dangerText}>Remove ({multi.length})</Text>
-                </Pressable>
-              </>
-            )}
-            <Pressable style={[u.btn, showDims && u.primaryBtn]} onPress={toggleDims}>
-              <Text style={showDims ? u.primaryText : u.btnText}>Dimensions</Text>
-            </Pressable>
-          </View>
-            </>
+        <ScrollView style={styles.list} contentContainerStyle={{ paddingVertical: 12, gap: 10 }}>
+          {laneGroups.length === 0 && (
+            <Text style={u.empty}>No lane groups yet. Create one to start placing equipment.</Text>
           )}
-        </>
-      )}
-
-      {tab === 'lanes' && (
-        <>
-          <View style={u.wrap}>
-            <Pressable style={u.btn} onPress={autoLanes}>
-              <Text style={u.btnText}>Auto (one per wing)</Text>
-            </Pressable>
-            <Pressable
-              style={[u.primaryBtn, selectedLaneIds.length < 2 && u.btnDisabled]}
-              disabled={selectedLaneIds.length < 2}
-              onPress={mergeSelectedLanes}
-            >
-              <Text style={u.primaryText}>Group selected ({selectedLaneIds.length})</Text>
-            </Pressable>
-          </View>
-          <Text style={u.hint}>Tap a lane to edit it · tick two and Group to pair them</Text>
-          {lanes.length === 0 && <Text style={u.empty}>Add turnstiles, then tap Auto.</Text>}
-          <View style={u.wrap}>
-            {lanes.map((l) => {
-              const clear = laneClearMm(l, units, gaps)
-              const isSel = selectedLaneIds.includes(l.id)
-              return (
-                <View
-                  key={l.id}
-                  style={[
-                    styles.laneChip,
-                    {
-                      borderColor: isSel ? c.accent : l.color,
-                      backgroundColor: c.glass2,
-                    },
-                  ]}
-                >
+          {laneGroups.map((g) => {
+            const sum = groupSummary(units, lanes, g.id)
+            return (
+              <View
+                key={g.id}
+                style={[styles.groupCard, { backgroundColor: c.glass2, borderColor: c.hair }]}
+              >
+                <TextInput
+                  value={g.name}
+                  onChangeText={(t) => renameLaneGroup(g.id, t)}
+                  style={{ color: c.text, fontWeight: '700', fontSize: 16, paddingVertical: 0 }}
+                  accessibilityLabel="Lane group name"
+                />
+                <Text style={{ color: c.text2, fontSize: 13, marginTop: 4 }}>
+                  {sum.units} units · {sum.lanes} lanes
+                </Text>
+                <View style={styles.crudRow}>
                   <Pressable
-                    style={[styles.tick, { backgroundColor: isSel ? c.accent : c.fill2 }]}
-                    onPress={() => {
-                      tap()
-                      toggleLaneSelected(l.id)
-                    }}
+                    style={u.primaryBtn}
+                    testID={`build.group.${g.id}`}
+                    onPress={() => openGroup(g.id)}
                   >
-                    <Text style={{ color: isSel ? c.onAccent : c.text2, fontWeight: '700' }}>
-                      {isSel ? '✓' : ''}
-                    </Text>
+                    <Text style={u.primaryText}>Open</Text>
                   </Pressable>
                   <Pressable
-                    style={{ flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8 }}
+                    style={u.btn}
+                    testID={`build.group.adjust.${g.id}`}
+                    accessibilityLabel="Adjust lanes"
+                    onPress={() => openAdjust(g.id)}
+                  >
+                    <Text style={u.btnText}>Adjust lanes</Text>
+                  </Pressable>
+                  <Pressable
+                    style={u.btn}
                     onPress={() => {
                       tap()
-                      select({ kind: 'lane', id: l.id })
+                      duplicateLaneGroup(g.id)
                     }}
                   >
-                    <View style={[styles.dot, { backgroundColor: l.color }]} />
-                    <Text style={{ color: c.text, fontWeight: '600' }}>
-                      {l.name}
-                      {l.accessible ? ' ♿' : ''}
-                    </Text>
-                    <Text style={{ color: c.text2, fontSize: 12 }}>
-                      {l.members.length}w{clear != null ? ` · ${Math.round(clear)}mm` : ''}
-                    </Text>
+                    <Text style={u.btnText}>Copy</Text>
+                  </Pressable>
+                  <Pressable
+                    style={u.dangerBtn}
+                    onPress={() => {
+                      tap()
+                      deleteLaneGroup(g.id)
+                    }}
+                  >
+                    <Text style={u.dangerText}>Delete</Text>
                   </Pressable>
                 </View>
-              )
-            })}
-          </View>
-        </>
+              </View>
+            )
+          })}
+        </ScrollView>
+        {canSave && <SaveBar note={savedNote} onSave={saveInstallation} />}
+      </View>
+    )
+  }
+
+  if (!active) {
+    return (
+      <View style={styles.page}>
+        <Crumbs items={[{ label: 'Lane groups', onPress: goGroups }, { label: 'Select a group' }]} c={c} />
+        <Text style={u.empty}>Select a lane group first.</Text>
+      </View>
+    )
+  }
+
+  if (step === 'adjust') {
+    return (
+      <AdjustLanesPage
+        groupName={active.name}
+        groupId={active.id}
+        onBack={goGroups}
+      />
+    )
+  }
+
+  if (step === 'manufacturer') {
+    return (
+      <View style={styles.page}>
+        <Crumbs
+          items={[
+            { label: 'Lane groups', onPress: goGroups },
+            { label: active.name, onPress: goGroups },
+            { label: selectedMaker?.name ?? 'Manufacturer' },
+          ]}
+          c={c}
+        />
+        <Text style={[styles.title, { color: c.text }]}>Manufacturer</Text>
+        <Text style={[styles.hint, { color: c.text2 }]}>Select a manufacturer, then continue to models.</Text>
+
+        <Text style={u.label}>Manufacturer</Text>
+        <View style={{ gap: 8 }}>
+          {makers.map((m) => {
+            const on = m.id === makerId
+            return (
+              <Pressable
+                key={m.id}
+                style={[
+                  styles.makerCard,
+                  { backgroundColor: on ? c.thumb2 : c.glass2, borderColor: on ? c.accent : c.hair },
+                ]}
+                testID={`equipment.maker.${m.id}`}
+                onPress={() => {
+                  tap()
+                  setMakerId(m.id)
+                }}
+              >
+                <Text style={{ color: on ? c.onThumb : c.text, fontWeight: '800', fontSize: 18 }}>{m.name}</Text>
+                <Text style={{ color: on ? c.onThumb : c.text3, marginTop: 4 }}>{m.description}</Text>
+                {on && (
+                  <Text style={{ color: c.accentFg, fontWeight: '700', marginTop: 8 }}>Selected</Text>
+                )}
+              </Pressable>
+            )
+          })}
+        </View>
+
+        <Pressable
+          style={[u.primaryBtn, { marginTop: 16, alignSelf: 'flex-end' }]}
+          testID="build.wizard.next"
+          disabled={!selectedMaker}
+          onPress={() => {
+            tap()
+            setStep('models')
+          }}
+        >
+          <Text style={u.primaryText}>Next</Text>
+        </Pressable>
+      </View>
+    )
+  }
+
+  return (
+    <View style={styles.page}>
+      <Crumbs
+        items={[
+          { label: 'Lane groups', onPress: goGroups },
+          { label: active.name, onPress: goManufacturer },
+          { label: selectedMaker?.name ?? 'Manufacturer', onPress: goManufacturer },
+          { label: 'Models' },
+        ]}
+        c={c}
+      />
+      <Text style={[styles.title, { color: c.text }]}>Models</Text>
+      <Text style={[styles.hint, { color: c.text2 }]}>
+        Tap a model, then add it to {active.name}.
+      </Text>
+
+      <ScrollView style={styles.list} contentContainerStyle={{ paddingVertical: 12, gap: 10 }}>
+        {models.map((m) => (
+          <ModelPick
+            key={m.id}
+            model={m}
+            groupName={active.name}
+            open={pendingModel === m.id}
+            onPress={() => {
+              tap()
+              setPendingModel(pendingModel === m.id ? null : m.id)
+            }}
+            onAdd={() => {
+              tap()
+              insertUnit(m.id, undefined, active.id)
+              setPendingModel(null)
+              setSavedNote(null)
+            }}
+          />
+        ))}
+      </ScrollView>
+      <SaveBar
+        note={savedNote ?? (groupUnitCount === 0 ? 'Add at least one model to save' : null)}
+        disabled={!canSave}
+        onSave={saveInstallation}
+      />
+    </View>
+  )
+}
+
+const WIDTH_PRESETS = [
+  { cm: 60, label: '60 cm' },
+  { cm: 90, label: '90 cm' },
+  { cm: 100, label: '1 m' },
+]
+
+function leafLabel(unitId: string, wing: string, units: Array<{ id: string; type: UnitType }>) {
+  const u = units.find((x) => x.id === unitId)
+  const short = u ? CATALOG[u.type].short : 'Unit'
+  const leaves = u ? CATALOG[u.type].wings.length : 1
+  if (leaves < 2) return short
+  return `${short} ${wing}`
+}
+
+function AdjustLanesPage({
+  groupName,
+  groupId,
+  onBack,
+}: {
+  groupName: string
+  groupId: string
+  onBack: () => void
+}) {
+  const theme = useTheme((s) => s.theme)
+  const c = colors(theme)
+  const u = makeUiStyles(c)
+  const units = useCorridor((s) => s.units)
+  const lanes = useCorridor((s) => s.lanes)
+  const gaps = useCorridor((s) => s.gaps)
+  const renameLane = useCorridor((s) => s.renameLane)
+  const setLaneWidth = useCorridor((s) => s.setLaneWidth)
+  const mergeAdjacentLanes = useCorridor((s) => s.mergeAdjacentLanes)
+  const splitLane = useCorridor((s) => s.splitLane)
+  const [customFor, setCustomFor] = useState<string | null>(null)
+  const [customCm, setCustomCm] = useState('')
+
+  const groupLanes = lanes.filter((l) => l.groupId === groupId)
+  const groupUnits = units.filter((x) => x.groupId === groupId)
+
+  const applyCm = (laneId: string, cm: number) => {
+    const n = Math.max(20, Math.min(200, Math.round(cm)))
+    setLaneWidth(laneId, cmToMm(n))
+  }
+
+  return (
+    <View style={styles.page}>
+      <Crumbs
+        items={[{ label: 'Lane groups', onPress: onBack }, { label: groupName, onPress: onBack }, { label: 'Adjust lanes' }]}
+        c={c}
+      />
+      <Text style={[styles.title, { color: c.text }]}>Adjust lanes</Text>
+      <Text style={[styles.hint, { color: c.text2 }]}>
+        Each leaf is its own 60 cm lane. Merge only facing leaves on adjacent cabinets. Opening a merged lane opens both.
+      </Text>
+
+      <ScrollView style={styles.list} contentContainerStyle={{ paddingVertical: 12, gap: 10 }}>
+        {groupLanes.length === 0 && (
+          <Text style={u.empty}>Place equipment first. Each leaf becomes a lane automatically.</Text>
+        )}
+        {groupLanes.map((lane) => {
+          const mm = laneClearMm(lane, units, gaps)
+          const cm = Math.round(mm / 10)
+          const partner = mergePartner(lane, groupLanes, units)
+          const showMerge = partner && canMergeLanes(lane, partner, units) && groupLanes.indexOf(lane) < groupLanes.indexOf(partner)
+          return (
+            <View
+              key={lane.id}
+              style={[styles.laneCard, { backgroundColor: c.glass2, borderColor: c.hair }]}
+            >
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <View style={[styles.swatch, { backgroundColor: lane.color }]} />
+                <TextInput
+                  value={lane.name}
+                  onChangeText={(t) => renameLane(lane.id, t)}
+                  style={{ flex: 1, color: c.text, fontWeight: '700', fontSize: 16, paddingVertical: 0 }}
+                  accessibilityLabel="Lane name"
+                />
+              </View>
+              <Text style={{ color: c.text2, fontSize: 13, marginTop: 6 }}>
+                {lane.members.map((m) => leafLabel(m.unitId, m.wing, groupUnits)).join('  ·  ')}
+                {lane.members.length > 1 ? '  ·  merged' : ''}
+              </Text>
+              <Text style={u.label}>Width</Text>
+              <View style={styles.crudRow}>
+                {WIDTH_PRESETS.map((p) => {
+                  const on = cm === p.cm
+                  return (
+                    <Pressable
+                      key={p.cm}
+                      style={[u.btn, on && { borderColor: c.accent, borderWidth: 1.5 }]}
+                      onPress={() => {
+                        tap()
+                        setCustomFor(null)
+                        applyCm(lane.id, p.cm)
+                      }}
+                    >
+                      <Text style={u.btnText}>{p.label}</Text>
+                    </Pressable>
+                  )
+                })}
+                <Pressable
+                  style={[u.btn, customFor === lane.id && { borderColor: c.accent, borderWidth: 1.5 }]}
+                  onPress={() => {
+                    tap()
+                    setCustomFor(lane.id)
+                    setCustomCm(String(cm))
+                  }}
+                >
+                  <Text style={u.btnText}>Custom</Text>
+                </Pressable>
+              </View>
+              {customFor === lane.id && (
+                <View style={[styles.crudRow, { marginTop: 8 }]}>
+                  <TextInput
+                    value={customCm}
+                    onChangeText={setCustomCm}
+                    keyboardType="number-pad"
+                    placeholder="cm"
+                    placeholderTextColor={c.text3}
+                    style={{
+                      flex: 1,
+                      minHeight: 44,
+                      borderRadius: 14,
+                      borderWidth: 1,
+                      borderColor: c.hair,
+                      color: c.text,
+                      paddingHorizontal: 12,
+                    }}
+                    accessibilityLabel="Custom width in centimetres"
+                  />
+                  <Pressable
+                    style={u.primaryBtn}
+                    onPress={() => {
+                      tap()
+                      const n = Number(customCm)
+                      if (!Number.isFinite(n)) return
+                      applyCm(lane.id, n)
+                    }}
+                  >
+                    <Text style={u.primaryText}>Set cm</Text>
+                  </Pressable>
+                </View>
+              )}
+              <Text style={{ color: c.text3, fontSize: 12, marginTop: 6 }}>Now {formatClearCm(mm)}</Text>
+              <View style={[styles.crudRow, { marginTop: 10 }]}>
+                {showMerge && partner && (
+                  <Pressable
+                    style={u.primaryBtn}
+                    testID={`build.lane.merge.${lane.id}`}
+                    onPress={() => {
+                      tap()
+                      mergeAdjacentLanes(lane.id, partner.id)
+                    }}
+                  >
+                    <Text style={u.primaryText}>Merge with {partner.name}</Text>
+                  </Pressable>
+                )}
+                {lane.members.length > 1 && (
+                  <Pressable
+                    style={u.btn}
+                    onPress={() => {
+                      tap()
+                      splitLane(lane.id)
+                    }}
+                  >
+                    <Text style={u.btnText}>Split</Text>
+                  </Pressable>
+                )}
+              </View>
+            </View>
+          )
+        })}
+      </ScrollView>
+    </View>
+  )
+}
+
+function Crumbs({ items, c }: { items: Crumb[]; c: ThemeColors }) {
+  return (
+    <View style={styles.crumbs} accessibilityRole="header">
+      {items.map((it, i) => (
+        <View key={`${it.label}-${i}`} style={styles.crumbItem}>
+          {i > 0 && (
+            <Text style={[styles.sep, { color: c.text3 }]} accessibilityElementsHidden>
+              ›
+            </Text>
+          )}
+          {it.onPress ? (
+            <Pressable
+              onPress={it.onPress}
+              hitSlop={8}
+              accessibilityLabel={`Back to ${it.label}`}
+              testID={`build.crumb.${i}`}
+            >
+              <Text style={[styles.crumbLink, { color: c.accentFg }]} numberOfLines={1}>
+                {it.label}
+              </Text>
+            </Pressable>
+          ) : (
+            <Text style={[styles.crumbHere, { color: c.text }]} numberOfLines={1}>
+              {it.label}
+            </Text>
+          )}
+        </View>
+      ))}
+    </View>
+  )
+}
+
+function SaveBar({
+  note,
+  disabled,
+  onSave,
+}: {
+  note: string | null
+  disabled?: boolean
+  onSave: () => void
+}) {
+  const theme = useTheme((s) => s.theme)
+  const c = colors(theme)
+  const u = makeUiStyles(c)
+  return (
+    <View style={styles.saveBar}>
+      {note ? <Text style={{ color: c.text3, fontSize: 12, marginBottom: 8 }}>{note}</Text> : null}
+      <Pressable
+        style={[u.primaryBtn, disabled && u.btnDisabled]}
+        testID="build.save"
+        accessibilityLabel="Save installation"
+        disabled={disabled}
+        onPress={onSave}
+      >
+        <Text style={u.primaryText}>Save installation</Text>
+      </Pressable>
+    </View>
+  )
+}
+
+function ModelPick({
+  model,
+  groupName,
+  open,
+  onPress,
+  onAdd,
+}: {
+  model: TurnstileModel
+  groupName: string
+  open: boolean
+  onPress: () => void
+  onAdd: () => void
+}) {
+  const theme = useTheme((s) => s.theme)
+  const c = colors(theme)
+  const u = makeUiStyles(c)
+  return (
+    <View style={[styles.modelCard, { backgroundColor: c.glass2, borderColor: open ? c.accent : c.hair }]}>
+      <Pressable testID={`equipment.model.${model.id}`} onPress={onPress}>
+        <Text style={{ color: c.text3, fontSize: 11, fontWeight: '700', letterSpacing: 0.6 }}>
+          {model.modelCode}
+        </Text>
+        <Text style={{ color: c.text, fontWeight: '700', fontSize: 16, marginTop: 4 }}>{model.name}</Text>
+        <Text style={{ color: c.text2, fontSize: 13, marginTop: 2 }}>{categoryLabel(model.category)}</Text>
+        <Text style={{ color: c.text3, fontSize: 12, marginTop: 6 }}>{formatDimsMm(model)}</Text>
+      </Pressable>
+      {open && (
+        <Pressable
+          style={[u.primaryBtn, { marginTop: 12 }]}
+          testID={`equipment.add.${model.id}`}
+          onPress={onAdd}
+        >
+          <Text style={u.primaryText}>Add to {groupName}</Text>
+        </Pressable>
       )}
-
-      {tab === 'look' && (
-        <>
-          <Text style={u.label}>Cabinet finish</Text>
-          <View style={u.wrap}>
-            {FINISH_ORDER.map((f) => (
-              <Pressable
-                key={f}
-                style={[u.chip, finish === f && u.chipOn]}
-                onPress={() => {
-                  tap()
-                  setFinish(f)
-                }}
-              >
-                <View style={[styles.dot, { backgroundColor: FINISHES[f].color }]} />
-                <Text style={u.chipText}>{FINISHES[f].label}</Text>
-              </Pressable>
-            ))}
-          </View>
-
-          <Text style={u.label}>Glass</Text>
-          <View style={u.wrap}>
-            {GLASS_ORDER.map((g) => (
-              <Pressable
-                key={g}
-                style={[u.chip, glass === g && u.chipOn]}
-                onPress={() => {
-                  tap()
-                  setGlass(g)
-                }}
-              >
-                <View style={[styles.dot, { backgroundColor: GLASSES[g].color }]} />
-                <Text style={u.chipText}>{GLASSES[g].label}</Text>
-              </Pressable>
-            ))}
-          </View>
-
-          <Text style={u.label}>LED — whole corridor</Text>
-          <ColorPalette value={led} onChange={setLed} />
-
-          <Text style={u.label}>Appearance</Text>
-          <View style={u.wrap}>
-            {(
-              [
-                ['auto', 'Auto'],
-                ['light', 'Light'],
-                ['dark', 'Dark'],
-              ] as [ThemePref, string][]
-            ).map(([p, label]) => (
-              <Pressable
-                key={p}
-                style={[u.chip, themePref === p && u.chipOn]}
-                onPress={() => {
-                  tap()
-                  setThemePref(p)
-                }}
-              >
-                <Text style={u.chipText}>{label}</Text>
-              </Pressable>
-            ))}
-          </View>
-          <Text style={u.hint}>Auto follows this device light or dark setting</Text>
-
-          <Text style={u.label}>Environment</Text>
-          <View style={u.wrap}>
-            {ENV_ORDER.map((e) => (
-              <Pressable
-                key={e}
-                style={[u.chip, env === e && u.chipOn]}
-                onPress={() => {
-                  tap()
-                  setEnv(e)
-                }}
-              >
-                <Text style={u.chipText}>{ENVS[e].label}</Text>
-              </Pressable>
-            ))}
-          </View>
-
-          <Text style={u.label}>People walking through</Text>
-          <View style={u.wrap}>
-            {(['off', 'few', 'busy'] as CrowdLevel[]).map((cl) => (
-              <Pressable
-                key={cl}
-                style={[u.chip, crowd === cl && u.chipOn]}
-                onPress={() => {
-                  tap()
-                  setCrowd(cl)
-                }}
-              >
-                <Text style={u.chipText}>{cl === 'off' ? 'Off' : cl === 'few' ? 'A few' : 'Busy'}</Text>
-              </Pressable>
-            ))}
-          </View>
-          <Text style={u.hint}>Characters walk the open lanes and follow each lane's direction.</Text>
-        </>
-      )}
-    </ScrollView>
+    </View>
   )
 }
 
 const styles = StyleSheet.create({
-  palette: { flexDirection: 'row', gap: 10, paddingBottom: 4 },
-  palCard: {
-    width: 136,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    borderRadius: 18,
-    borderWidth: 1,
-    alignItems: 'flex-start',
-  },
-  glyph: {
-    width: 40,
-    height: 40,
-    borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 6,
-  },
-  laneChip: {
+  page: { flex: 1, paddingHorizontal: 20, paddingTop: 10, paddingBottom: 12 },
+  title: { fontSize: 20, fontWeight: '800', marginTop: 4 },
+  hint: { fontSize: 13, marginTop: 4, lineHeight: 18 },
+  crumbs: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     alignItems: 'center',
-    gap: 8,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
+    minHeight: 36,
+    rowGap: 4,
+  },
+  crumbItem: { flexDirection: 'row', alignItems: 'center', maxWidth: '100%' },
+  sep: { fontSize: 15, fontWeight: '600', marginHorizontal: 6 },
+  crumbLink: { fontSize: 13, fontWeight: '700' },
+  crumbHere: { fontSize: 13, fontWeight: '800' },
+  list: { flex: 1 },
+  groupCard: {
+    padding: 14,
     borderRadius: 14,
     borderWidth: 1.5,
-    minWidth: 160,
   },
-  tick: {
-    width: 44,
-    height: 44,
-    borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
+  crudRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 10 },
+  makerCard: {
+    padding: 16,
+    borderRadius: 14,
+    borderWidth: 1.5,
   },
-  dot: { width: 10, height: 10, borderRadius: 5 },
+  modelCard: {
+    padding: 14,
+    borderRadius: 14,
+    borderWidth: 1.5,
+  },
+  laneCard: {
+    padding: 14,
+    borderRadius: 14,
+    borderWidth: 1.5,
+  },
+  swatch: { width: 12, height: 12, borderRadius: 6 },
+  saveBar: { paddingTop: 8 },
 })

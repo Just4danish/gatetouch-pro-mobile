@@ -8,8 +8,10 @@ import {
   GLASS_ORDER,
   LED_DEFAULT,
 } from '../model/catalog'
+import { formatClearCm } from '../model/installation'
+import { modelOfUnitType } from '../model/products'
 import {
-  computeLayout,
+  computeWorldLayout,
   laneGap,
   useCorridor,
   type Lane,
@@ -33,7 +35,7 @@ const MODES: { id: LaneMode; label: string; hint: string }[] = [
 const DIRS: { id: LaneDirection; label: string }[] = [
   { id: 'in', label: 'Entry' },
   { id: 'out', label: 'Exit' },
-  { id: 'both', label: 'Both' },
+  { id: 'both', label: 'Bidirectional' },
 ]
 
 function Stepper({
@@ -83,6 +85,8 @@ function UnitBody({ unit }: { unit: PlacedUnit }) {
   const c = colors(theme)
   const u = makeUiStyles(c)
   const spec = CATALOG[unit.type]
+  const product = modelOfUnitType(unit.type)
+  const group = useCorridor((s) => s.laneGroups.find((g) => g.id === unit.groupId))
   const globalLed = useCorridor((s) => s.led)
   const globalFinish = useCorridor((s) => s.finish)
   const globalGlass = useCorridor((s) => s.glass)
@@ -99,11 +103,18 @@ function UnitBody({ unit }: { unit: PlacedUnit }) {
 
   return (
     <>
-      <Text style={{ color: c.text, fontSize: 18, fontWeight: '800' }}>{spec.label}</Text>
-      <Text style={{ color: c.text3, marginBottom: 8 }}>
-        {spec.bodyMm} mm body · arm reach {Math.round(spec.reach.left + spec.reach.right)} mm
-        {unit.flipped ? ' · flipped' : ''}
+      <Text style={{ color: c.text3, fontSize: 12, fontWeight: '700', letterSpacing: 0.8 }}>
+        {product.manufacturerId.toUpperCase()}
       </Text>
+      <Text style={{ color: c.text, fontSize: 18, fontWeight: '800' }}>{product.name}</Text>
+      <Text style={{ color: c.text3, marginBottom: 8 }}>
+        {product.modelCode} · {product.widthMm} × {product.lengthMm} × {product.heightMm} mm
+        {unit.flipped ? ' · flipped' : ''}
+        {group ? ` · ${group.name}` : ''}
+      </Text>
+      <Text style={u.label}>Product</Text>
+      <Text style={{ color: c.text2, marginBottom: 8 }}>{spec.label}</Text>
+      <Text style={u.label}>Placement</Text>
       <View style={u.wrap}>
         <Pressable
           style={u.btn}
@@ -124,6 +135,17 @@ function UnitBody({ unit }: { unit: PlacedUnit }) {
           <Text style={u.btnText}>Duplicate</Text>
         </Pressable>
         <Pressable
+          style={u.btn}
+          onPress={() => {
+            tap()
+            useCorridor.getState().setMultiSelectMode(true)
+            useCorridor.getState().toggleMulti(unit.id)
+            useCorridor.getState().select(null)
+          }}
+        >
+          <Text style={u.btnText}>Select Multiple</Text>
+        </Pressable>
+        <Pressable
           style={u.dangerBtn}
           onPress={() => {
             tap()
@@ -134,6 +156,7 @@ function UnitBody({ unit }: { unit: PlacedUnit }) {
         </Pressable>
       </View>
 
+      <Text style={u.label}>Appearance</Text>
       <Text style={u.label}>Cabinet finish</Text>
       <View style={u.wrap}>
         {FINISH_ORDER.map((f) => (
@@ -200,10 +223,12 @@ function LaneBody({ lane }: { lane: Lane }) {
   const tooNarrow = lane.accessible && g != null && g.value < ACCESSIBLE_MIN_MM
 
   const focus = () => {
-    const layout = computeLayout(units, gaps)
+    const layout = computeWorldLayout(units, gaps, useCorridor.getState().laneGroups)
     const xs = lane.members.map((m) => layout.x[m.unitId]).filter((v) => v != null)
+    const zs = lane.members.map((m) => layout.z[m.unitId]).filter((v) => v != null)
     const cx = xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : layout.centerX
-    flyTo([cx + 0.5, 1.35, 2.3], [cx, 0.55, 0])
+    const cz = zs.length ? zs.reduce((a, b) => a + b, 0) / zs.length : layout.centerZ
+    flyTo([cx + 0.5, 1.35, cz + 2.3], [cx, 0.55, cz])
   }
 
   return (
@@ -218,7 +243,16 @@ function LaneBody({ lane }: { lane: Lane }) {
       </View>
       <Text style={{ color: c.text3, marginBottom: 8 }}>
         {lane.members.length} wing{lane.members.length > 1 ? 's' : ''}
-        {g ? ` · clear ${Math.round(g.value)} mm` : ' · faces open space'}
+        {g ? ` · clear width ${formatClearCm(g.value)}` : ' · faces open space'}
+      </Text>
+      <Text style={u.label}>Associated units</Text>
+      <Text style={{ color: c.text2, marginBottom: 8 }}>
+        {lane.members
+          .map((m) => {
+            const u = units.find((x) => x.id === m.unitId)
+            return u ? CATALOG[u.type].short : m.unitId
+          })
+          .join('  ·  ') || '—'}
       </Text>
 
       <View style={u.wrap}>
@@ -253,20 +287,20 @@ function LaneBody({ lane }: { lane: Lane }) {
         </Pressable>
       </View>
 
-      <Text style={u.label}>Lane width</Text>
+      <Text style={u.label}>Clear Width</Text>
       {g ? (
         <>
           <Stepper
             label="Clear"
-            value={g.value}
-            min={g.min}
-            max={g.max}
-            step={5}
-            suffix=" mm"
-            onChange={(v) => setLaneWidth(lane.id, v)}
+            value={g.value / 10}
+            min={g.min / 10}
+            max={g.max / 10}
+            step={1}
+            suffix=" cm"
+            onChange={(v) => setLaneWidth(lane.id, v * 10)}
           />
           <Text style={u.hint}>
-            {Math.round(g.min)} arms touch — {Math.round(g.max)} max
+            Range {formatClearCm(g.min)} – {formatClearCm(g.max)}
           </Text>
           {tooNarrow && (
             <Text style={{ color: c.orangeFg, fontSize: 12, marginTop: 4 }}>
@@ -333,47 +367,139 @@ function LaneBody({ lane }: { lane: Lane }) {
   )
 }
 
+function GroupBody({ groupId }: { groupId: string }) {
+  const theme = useTheme((s) => s.theme)
+  const c = colors(theme)
+  const u = makeUiStyles(c)
+  const group = useCorridor((s) => s.laneGroups.find((g) => g.id === groupId))
+  const units = useCorridor((s) => s.units)
+  const lanes = useCorridor((s) => s.lanes)
+  const renameLaneGroup = useCorridor((s) => s.renameLaneGroup)
+  const setGroupDefaultClear = useCorridor((s) => s.setGroupDefaultClear)
+  const rotateLaneGroup = useCorridor((s) => s.rotateLaneGroup)
+  const duplicateLaneGroup = useCorridor((s) => s.duplicateLaneGroup)
+  const deleteLaneGroup = useCorridor((s) => s.deleteLaneGroup)
+  const fitSelection = useCorridor((s) => s.fitSelection)
+  if (!group) return null
+  const nUnits = units.filter((x) => x.groupId === group.id).length
+  const nLanes = lanes.filter((l) => l.groupId === group.id).length
+
+  return (
+    <>
+      <TextInput
+        value={group.name}
+        onChangeText={(t) => renameLaneGroup(group.id, t)}
+        style={[styles.nameInput, { color: c.text, borderColor: c.hair, backgroundColor: c.surface }]}
+      />
+      <Text style={{ color: c.text3, marginBottom: 8 }}>
+        {nUnits} Turnstile Units · {nLanes} Lanes · default {formatClearCm(group.defaultClearMm)}
+      </Text>
+      <View style={u.wrap}>
+        <Pressable style={u.btn} onPress={() => fitSelection()}>
+          <Text style={u.btnText}>Fit</Text>
+        </Pressable>
+        <Pressable style={u.btn} onPress={() => rotateLaneGroup(group.id, Math.PI / 2)}>
+          <Text style={u.btnText}>Rotate</Text>
+        </Pressable>
+        <Pressable style={u.btn} onPress={() => duplicateLaneGroup(group.id)}>
+          <Text style={u.btnText}>Duplicate</Text>
+        </Pressable>
+        <Pressable style={u.dangerBtn} onPress={() => deleteLaneGroup(group.id)}>
+          <Text style={u.dangerText}>Delete</Text>
+        </Pressable>
+      </View>
+      <Text style={u.label}>Default lane width</Text>
+      <View style={u.wrap}>
+        {[600, 900, 1000].map((mm) => (
+          <Pressable
+            key={mm}
+            style={[u.chip, group.defaultClearMm === mm && u.chipOn]}
+            onPress={() => setGroupDefaultClear(group.id, mm)}
+          >
+            <Text style={u.chipText}>{formatClearCm(mm)}</Text>
+          </Pressable>
+        ))}
+      </View>
+    </>
+  )
+}
+
 export function Inspector() {
   const theme = useTheme((s) => s.theme)
   const c = colors(theme)
   const sel = useCorridor((s) => s.sel)
+  const multi = useCorridor((s) => s.multi)
   const units = useCorridor((s) => s.units)
   const lanes = useCorridor((s) => s.lanes)
   const select = useCorridor((s) => s.select)
 
   const unit = sel?.kind === 'unit' ? units.find((x) => x.id === sel.id) : undefined
   const lane = sel?.kind === 'lane' ? lanes.find((x) => x.id === sel.id) : undefined
-  const open = Boolean(unit || lane)
+  const groupSel = sel?.kind === 'group' ? sel.id : undefined
+  const open = Boolean((unit || lane || groupSel) && multi.length !== 2)
 
   return (
     <Modal visible={open} animationType="slide" transparent onRequestClose={() => select(null)}>
-      <Pressable style={styles.backdrop} onPress={() => select(null)} />
-      <View style={[styles.sheet, { backgroundColor: c.inspBg }]}>
-        <View style={styles.grabRow}>
-          <View style={[styles.grab, { backgroundColor: c.raise }]} />
-          <Pressable onPress={() => select(null)} style={styles.close} accessibilityLabel="Close properties">
-            <Text style={{ color: c.text2, fontSize: 22, fontWeight: '600' }}>×</Text>
-          </Pressable>
+      <View style={styles.modalRoot}>
+        <Pressable
+          style={styles.backdrop}
+          onPress={() => select(null)}
+          accessibilityLabel="Dismiss properties"
+        />
+        <View style={[styles.sheet, { backgroundColor: c.inspBg }]}>
+          <View style={styles.grabRow}>
+            <View style={styles.headerSide} />
+            <View style={[styles.grab, { backgroundColor: c.raise }]} />
+            <Pressable
+              onPress={() => {
+                tap()
+                select(null)
+              }}
+              style={styles.close}
+              hitSlop={8}
+              testID="inspector.close"
+              accessibilityLabel="Close properties"
+            >
+              <Text style={{ color: c.text2, fontSize: 22, fontWeight: '600' }}>×</Text>
+            </Pressable>
+          </View>
+          <ScrollView contentContainerStyle={{ padding: 16, gap: 6, paddingBottom: 40 }}>
+            {unit && <UnitBody unit={unit} />}
+            {lane && <LaneBody lane={lane} />}
+            {groupSel && <GroupBody groupId={groupSel} />}
+          </ScrollView>
         </View>
-        <ScrollView contentContainerStyle={{ padding: 16, gap: 6, paddingBottom: 40 }}>
-          {unit && <UnitBody unit={unit} />}
-          {lane && <LaneBody lane={lane} />}
-        </ScrollView>
       </View>
     </Modal>
   )
 }
 
 const styles = StyleSheet.create({
-  backdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.35)' },
+  modalRoot: { flex: 1, justifyContent: 'flex-end' },
+  backdrop: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    backgroundColor: 'rgba(0,0,0,0.35)',
+  },
   sheet: {
     maxHeight: '70%',
-    borderTopLeftRadius: 28,
-    borderTopRightRadius: 28,
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
+    zIndex: 1,
   },
-  grabRow: { alignItems: 'center', paddingTop: 10, paddingBottom: 4 },
+  grabRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    minHeight: 48,
+    paddingHorizontal: 8,
+  },
+  headerSide: { width: 44, height: 44 },
   grab: { width: 40, height: 5, borderRadius: 3 },
-  close: { position: 'absolute', right: 12, top: 4, width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
+  close: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
   nameInput: {
     flex: 1,
     borderWidth: 1,

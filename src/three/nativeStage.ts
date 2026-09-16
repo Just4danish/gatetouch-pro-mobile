@@ -1,10 +1,11 @@
 import * as THREE from 'three'
+import { patchThreeShaders, toStandardMaterial } from './fixThreeShaders'
 import { CATALOG, ENVS, FINISHES, GLASSES, LED_DEFAULT, MESH, envColors, wingClipMap } from '../model/catalog'
 import type { FinishId, GlassId, LedConfig, UnitType, WingId } from '../model/catalog'
 import { stageFrame } from '../lib/stageFrame'
 import { useTheme } from '../store/theme'
 import {
-  computeLayout,
+  computeWorldLayout,
   laneOfWing,
   lanesOfUnit,
   useCorridor,
@@ -15,6 +16,8 @@ import {
   type PlacedUnit,
 } from '../store/corridor'
 import { loadGltf } from './gltfCache'
+
+patchThreeShaders()
 
 const MODEL_ASSETS: Record<UnitType, number> = {
   gla1: require('../../assets/models/gl_a1.glb'),
@@ -136,21 +139,7 @@ function buildPack(type: UnitType, scene: THREE.Group, _animations: THREE.Animat
     const cached = matCache.get(src.uuid)
     let mine: THREE.Material = cached ?? src.clone()
     if (!cached) {
-      // Drop MeshPhysicalMaterial entirely — Expo GL warns on dispersion/transmission shaders.
-      if ((mine as THREE.MeshPhysicalMaterial).isMeshPhysicalMaterial) {
-        const phys = mine as THREE.MeshPhysicalMaterial
-        mine = new THREE.MeshStandardMaterial({
-          color: phys.color.clone(),
-          map: phys.map,
-          roughness: phys.roughness,
-          metalness: phys.metalness,
-          emissive: phys.emissive?.clone?.() ?? new THREE.Color(0x000000),
-          emissiveIntensity: phys.emissiveIntensity ?? 0,
-          transparent: phys.transparent,
-          opacity: phys.opacity,
-          side: phys.side,
-        })
-      }
+      mine = toStandardMaterial(mine)
       matCache.set(src.uuid, mine)
     }
     o.material = mine
@@ -327,13 +316,23 @@ function laneCenterX(lane: Lane, xs: Record<string, number>) {
   return pts.reduce((a, b) => a + b, 0) / pts.length
 }
 
+export type CameraAction = 'idle' | 'orbit' | 'pan' | 'zoom'
+
+export type CameraInfo = {
+  action: CameraAction
+  radius: number
+  theta: number
+  phi: number
+}
+
 export type NativeStage = {
   canvas: FakeCanvas
   setViewSize: (w: number, h: number) => void
-  pick: (sx: number, sy: number) => { kind: 'unit' | 'lane'; id: string } | null
+  pick: (sx: number, sy: number) => { kind: 'unit' | 'lane' | 'slot'; id: string } | null
   orbitBy: (dx: number, dy: number) => void
   panBy: (dx: number, dy: number) => void
   zoomBy: (factor: number) => void
+  cameraInfo: () => CameraInfo
   dispose: () => void
 }
 
@@ -451,7 +450,7 @@ export function createNativeStage(
   let alive = true
   let raf = 0
 
-  const ghost = new THREE.Mesh(
+  const ghostMesh = new THREE.Mesh(
     new THREE.BoxGeometry(0.3, 1.16, 0.42),
     new THREE.MeshStandardMaterial({
       color: '#0a84ff',
@@ -461,9 +460,10 @@ export function createNativeStage(
       opacity: 0.18,
     }),
   )
-  ghost.position.y = 0.58
-  ghost.visible = false
-  scene.add(ghost)
+  ghostMesh.position.y = 0.58
+  ghostMesh.visible = false
+  scene.add(ghostMesh)
+  let lastAction: CameraAction = 'idle'
 
   function setViewSize(w: number, h: number) {
     viewW = Math.max(w, 1)
@@ -485,7 +485,7 @@ export function createNativeStage(
     for (const h of hits) {
       let o: THREE.Object3D | null = h.object
       while (o) {
-        const p = o.userData.pick as { kind: 'unit' | 'lane'; id: string } | undefined
+        const p = o.userData.pick as { kind: 'unit' | 'lane' | 'slot'; id: string } | undefined
         if (p) return p
         o = o.parent
       }
@@ -569,20 +569,23 @@ export function createNativeStage(
     paint(pack.arrowOut, outOk)
     const selected = selId === u.id
     const isMulti = multi.includes(u.id)
-    pack.ring.visible = selected || isMulti
-    if (pack.ring.material instanceof THREE.MeshBasicMaterial) {
-      pack.ring.material.color.set(isMulti ? '#ff9f0a' : '#0a84ff')
+    if (pack.ring) {
+      pack.ring.visible = selected || isMulti
+      if (pack.ring.material instanceof THREE.MeshBasicMaterial) {
+        pack.ring.material.color.set(isMulti ? '#ff9f0a' : '#0a84ff')
+      }
     }
-    pack.access.visible = unitLanes.some((l) => l.accessible)
+    if (pack.access) pack.access.visible = unitLanes.some((l) => l.accessible)
   }
 
-  function rebuildExtras(layout: Layout, lanes: Lane[], showDims: boolean, showGhost: boolean, maxDepth: number, mode: string) {
-    const sig = `${showDims}|${showGhost}|${layout.edges.map((e) => e.id).join(',')}|${lanes.map((l) => l.id + l.open + l.mode).join(',')}|${mode}`
+  function rebuildExtras(layout: Layout, lanes: Lane[], showDims: boolean, showGhost: boolean, maxDepth: number, mode: string, placing: boolean) {
+    const sig = `${showDims}|${showGhost}|${placing}|${layout.edges.map((e) => e.id).join(',')}|${lanes.map((l) => l.id + l.open + l.mode).join(',')}|${mode}|${layout.slots.map((s) => s.index).join(',')}`
     if (sig === extraSig) {
       for (const child of extras.children) {
         const lane = lanes.find((l) => l.id === child.userData.laneId)
         if (!lane) continue
         child.position.x = laneCenterX(lane, layout.x)
+        child.position.z = laneCenterX(lane, layout.z)
         const blocked = lane.mode === 'locked' || lane.mode === 'noentry'
         const color = blocked ? '#ff9f0a' : lane.open ? '#30d158' : '#ff453a'
         const mat = (child as THREE.Mesh).material
@@ -594,13 +597,23 @@ export function createNativeStage(
     for (const child of [...extras.children]) extras.remove(child)
 
     if (showDims || showGhost) {
-      const z = maxDepth / 2 + 0.15
       const edges = layout.edges
       for (let i = 0; i < edges.length - 1; i++) {
-        extras.add(dimBar(edges[i].right, edges[i + 1].left, z, '#0a84ff'))
+        if (edges[i].id && edges[i + 1].id) {
+          extras.add(dimBar(edges[i].right, edges[i + 1].left, edges[i].z + maxDepth / 2 + 0.15, '#0a84ff'))
+        }
       }
-      if (edges.length > 0) {
-        extras.add(dimBar(edges[0].left, edges[edges.length - 1].right, z + 0.38, '#ff9f0a'))
+    }
+
+    if (placing) {
+      for (const slot of layout.slots) {
+        const mesh = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.12, 0.12, 0.04, 20),
+          new THREE.MeshBasicMaterial({ color: '#0a84ff', transparent: true, opacity: 0.45, toneMapped: false }),
+        )
+        mesh.position.set(slot.x, 0.02, slot.z)
+        mesh.userData.pick = { kind: 'slot', id: `${slot.groupId}:${slot.index}` }
+        extras.add(mesh)
       }
     }
 
@@ -611,7 +624,7 @@ export function createNativeStage(
           new THREE.MeshBasicMaterial({ color: '#ff453a', transparent: true, opacity: 0.7, side: THREE.DoubleSide }),
         )
         mesh.rotation.x = -Math.PI / 2
-        mesh.position.set(laneCenterX(lane, layout.x), 0.02, 0)
+        mesh.position.set(laneCenterX(lane, layout.x), 0.02, laneCenterX(lane, layout.z))
         mesh.userData.pick = { kind: 'lane', id: lane.id }
         mesh.userData.laneId = lane.id
         extras.add(mesh)
@@ -633,21 +646,29 @@ export function createNativeStage(
     bg.set(look.backdrop)
 
     const drag = useDrag.getState()
-    const showGhost = drag.type != null && drag.index != null
-    const base = computeLayout(s.units, s.gaps)
-    const layout = showGhost ? computeLayout(s.units, s.gaps, { index: drag.index!, type: drag.type! }) : base
+    const placing = s.mode === 'build' && s.placingType != null
+    const showGhost = (drag.type != null && drag.index != null) || placing
+    const ghostHint =
+      drag.type != null && drag.index != null
+        ? { index: drag.index, type: drag.type, groupId: s.activeGroupId ?? s.laneGroups[0]?.id ?? 'lg_implicit' }
+        : placing
+          ? { index: s.units.filter((u) => u.groupId === (s.activeGroupId ?? '')).length, type: s.placingType!, groupId: s.activeGroupId ?? s.laneGroups[0]?.id ?? 'lg_implicit' }
+          : undefined
+    const layout = computeWorldLayout(s.units, s.gaps, s.laneGroups, ghostHint)
+    const base = computeWorldLayout(s.units, s.gaps, s.laneGroups)
     const targets = wingTargets(s.lanes)
     const maxDepth = s.units.reduce((m, u) => Math.max(m, CATALOG[u.type].depthMm / 1000), 1)
 
     const fw = Math.max(layout.width + 30, 34)
     floor.position.x = layout.centerX
+    floor.position.z = layout.centerZ
     if (Math.abs((floor.geometry as THREE.PlaneGeometry).parameters.width - fw) > 0.5) {
       floor.geometry.dispose()
       floor.geometry = new THREE.PlaneGeometry(fw, 40)
     }
 
-    key.position.set(layout.centerX + 3, 5, 3)
-    fill.position.set(layout.centerX - 3, 2, -3)
+    key.position.set(layout.centerX + 3, 5, layout.centerZ + 3)
+    fill.position.set(layout.centerX - 3, 2, layout.centerZ - 3)
 
     const live = new Set(s.units.map((u) => u.id))
     for (const [id, pack] of packs) {
@@ -665,7 +686,10 @@ export function createNativeStage(
     for (const u of s.units) ensureUnit(u)
     for (const u of s.units) {
       const ph = placeholders.get(u.id)
-      if (ph) ph.position.x = layout.x[u.id] ?? 0
+      if (ph) {
+        ph.position.x = layout.x[u.id] ?? 0
+        ph.position.z = layout.z[u.id] ?? 0
+      }
     }
 
     const selId = s.mode === 'build' && s.sel?.kind === 'unit' ? s.sel.id : null
@@ -673,8 +697,10 @@ export function createNativeStage(
       const pack = packs.get(u.id)
       if (!pack) continue
       const x = layout.x[u.id] ?? 0
+      const z = layout.z[u.id] ?? 0
       pack.root.position.x = THREE.MathUtils.damp(pack.root.position.x || x, x, 9, dt)
-      pack.root.rotation.y = u.flipped ? Math.PI : 0
+      pack.root.position.z = THREE.MathUtils.damp(pack.root.position.z || z, z, 9, dt)
+      pack.root.rotation.y = layout.rotY[u.id] ?? (u.flipped ? Math.PI : 0)
       paintUnit(u, pack, s.lanes, s.led, s.finish, s.glass, selId, s.multi)
 
       for (const w of pack.wings) {
@@ -700,11 +726,14 @@ export function createNativeStage(
 
     if (s.led.behavior === 'chase' && CHASE_TEX) CHASE_TEX.offset.x = (t0 * 0.45) % 1
 
-    ghost.visible = showGhost && layout.ghostX != null
-    if (ghost.visible && layout.ghostX != null) {
-      ghost.position.x = layout.ghostX
-      const body = CATALOG[drag.type!].bodyMm / 1000
-      ghost.scale.set(body / 0.3, 1, 1)
+    if (ghostMesh) {
+      ghostMesh.visible = Boolean(showGhost && layout.ghostX != null)
+      if (ghostMesh.visible && layout.ghostX != null) {
+        ghostMesh.position.x = layout.ghostX
+        ghostMesh.position.z = layout.ghostZ ?? 0
+        const body = CATALOG[(drag.type ?? s.placingType) || 'hg02_center'].bodyMm / 1000
+        ghostMesh.scale.set(body / 0.3, 1, 1)
+      }
     }
 
     if (drag.type) {
@@ -716,8 +745,10 @@ export function createNativeStage(
       } else {
         screenRay(drag.clientX - left, drag.clientY - top)
         if (ray.ray.intersectPlane(plane, hit)) {
-          const xs = s.units.map((u) => base.x[u.id])
-          let idx = s.units.length
+          const gid = s.activeGroupId ?? s.laneGroups[0]?.id
+          const members = gid ? s.units.filter((u) => u.groupId === gid) : s.units
+          const xs = members.map((u) => base.x[u.id])
+          let idx = members.length
           for (let i = 0; i < xs.length; i++) {
             if (hit.x < xs[i]) {
               idx = i
@@ -729,15 +760,18 @@ export function createNativeStage(
       }
     }
 
-    rebuildExtras(layout, s.lanes, s.showDims, showGhost, maxDepth, s.mode)
+    rebuildExtras(layout, s.lanes, s.showDims || placing, showGhost, maxDepth, s.mode, placing)
 
-    const dep = s.units.map((u) => `${u.id}${u.flipped ? 'f' : ''}`).join('|')
+    const dep = s.units.map((u) => `${u.id}${u.flipped ? 'f' : ''}${u.groupId}`).join('|') + s.laneGroups.map((g) => g.id).join(',')
     if (dimSig !== dep) {
       dimSig = dep
-      const dist = Math.max(base.width * 1.55, 5.2)
-      want.pos.set(base.centerX + dist * 0.22, dist * 0.42, dist * 0.95)
-      want.tgt.set(base.centerX, 0.55, 0)
-      want.active = true
+      const pendingCam = Boolean(s.camCmd && s.camCmd.n !== lastCamN)
+      if (!pendingCam) {
+        const dist = Math.max(base.width * 1.55, 5.2)
+        want.pos.set(base.centerX + dist * 0.22, dist * 0.42, base.centerZ + dist * 0.95)
+        want.tgt.set(base.centerX, 0.55, base.centerZ)
+        want.active = true
+      }
     }
     if (s.camCmd && s.camCmd.n !== lastCamN) {
       lastCamN = s.camCmd.n
@@ -778,6 +812,8 @@ export function createNativeStage(
     setViewSize,
     pick,
     orbitBy(dx: number, dy: number) {
+      if (!dx && !dy) return
+      lastAction = 'orbit'
       want.active = false
       offset.copy(camera.position).sub(orbitTarget)
       spherical.setFromVector3(offset)
@@ -790,6 +826,7 @@ export function createNativeStage(
     },
     panBy(dx: number, dy: number) {
       if (!dx && !dy) return
+      lastAction = 'pan'
       want.active = false
       camera.updateMatrixWorld()
       const dist = Math.max(camera.position.distanceTo(orbitTarget), 1.2)
@@ -802,6 +839,7 @@ export function createNativeStage(
     },
     zoomBy(factor: number) {
       if (!Number.isFinite(factor) || factor <= 0) return
+      lastAction = 'zoom'
       want.active = false
       offset.copy(camera.position).sub(orbitTarget)
       spherical.setFromVector3(offset)
@@ -809,6 +847,11 @@ export function createNativeStage(
       offset.setFromSpherical(spherical)
       camera.position.copy(orbitTarget).add(offset)
       camera.lookAt(orbitTarget)
+    },
+    cameraInfo() {
+      offset.copy(camera.position).sub(orbitTarget)
+      spherical.setFromVector3(offset)
+      return { action: lastAction, radius: spherical.radius, theta: spherical.theta, phi: spherical.phi }
     },
     dispose() {
       alive = false

@@ -1,8 +1,15 @@
-import { useEffect, useRef, useState } from 'react'
-import { LogBox, PanResponder, StyleSheet, Text, View } from 'react-native'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { LogBox, Platform, StyleSheet, Text, View } from 'react-native'
+import {
+  Gesture,
+  GestureDetector,
+  MouseButton,
+  PointerType,
+  ScrollView as GHScrollView,
+} from 'react-native-gesture-handler'
 import { GLView } from 'expo-gl'
 import { useCorridor } from '../store/corridor'
-import { createNativeStage, type NativeStage } from './nativeStage'
+import { createNativeStage, type CameraInfo, type NativeStage } from './nativeStage'
 
 // Expo GL is not a full browser WebGL2; Three logs noisy but non-fatal shader notes.
 LogBox.ignoreLogs([
@@ -11,6 +18,16 @@ LogBox.ignoreLogs([
   "EXGL: renderbufferStorageMultisample() isn't implemented yet!",
 ])
 
+function wheelFactor(dy: number) {
+  if (!dy || !Number.isFinite(dy)) return 1
+  const clamped = Math.max(-320, Math.min(320, dy))
+  return Math.exp(-clamped * 0.0016)
+}
+
+function fmtHud(info: CameraInfo) {
+  return `${info.action} r${info.radius.toFixed(2)}`
+}
+
 export function StageCanvas({ onMiss }: { onMiss: () => void }) {
   const stage = useRef<NativeStage | null>(null)
   const size = useRef({ width: 0, height: 0 })
@@ -18,127 +35,178 @@ export function StageCanvas({ onMiss }: { onMiss: () => void }) {
   onMissRef.current = onMiss
   const [ready, setReady] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const press = useRef<{
-    x: number
-    y: number
-    lastX: number
-    lastY: number
-    pageX: number
-    pageY: number
-    moved: boolean
-    held: boolean
-  } | null>(null)
-  const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const pinchDist = useRef<number | null>(null)
-  const pinchMid = useRef<{ x: number; y: number } | null>(null)
+  const [stageH, setStageH] = useState(0)
+  const [hud, setHud] = useState('idle r0.00')
+  const scrollRef = useRef<GHScrollView>(null)
+  const scrollMid = useRef(0)
+  const ignoreScroll = useRef(false)
+  const orbitLast = useRef({ x: 0, y: 0 })
+  const panLast = useRef({ x: 0, y: 0 })
+  const pinchLast = useRef(1)
+  const dragLock = useRef(0)
+
+  const applyWheel = (dy: number) => {
+    const factor = wheelFactor(dy)
+    if (Math.abs(factor - 1) > 0.001) stage.current?.zoomBy(factor)
+  }
+
+  const hitAt = (x: number, y: number, pageX: number, pageY: number, kind: 'tap' | 'hold') => {
+    const s = stage.current
+    const st = useCorridor.getState()
+    const hit = s?.pick(x, y)
+    if (kind === 'hold') {
+      if (hit?.kind === 'unit' && st.mode === 'build') st.openContextMenu(hit.id, pageX, pageY)
+      return
+    }
+    if (hit?.kind === 'slot' && st.placingType) {
+      const [gid, idx] = hit.id.split(':')
+      st.insertUnit(st.placingType, Number(idx), gid)
+      return
+    }
+    if (hit?.kind === 'unit' && st.mode === 'build') {
+      if (st.multiSelectMode) st.toggleMulti(hit.id)
+      else st.select({ kind: 'unit', id: hit.id })
+    } else if (hit?.kind === 'lane' && st.mode === 'operate') st.requestLane(hit.id)
+    else if (st.placingType) st.insertUnit(st.placingType)
+    else onMissRef.current()
+  }
+
+  const composed = useMemo(() => {
+    const pinch = Gesture.Pinch()
+      .runOnJS(true)
+      .onBegin(() => {
+        dragLock.current += 1
+        pinchLast.current = 1
+      })
+      .onFinalize(() => {
+        dragLock.current = Math.max(0, dragLock.current - 1)
+      })
+      .onUpdate((e) => {
+        const prev = pinchLast.current || 1
+        const factor = e.scale / prev
+        pinchLast.current = e.scale
+        if (Number.isFinite(factor) && Math.abs(factor - 1) > 0.001) stage.current?.zoomBy(factor)
+      })
+
+    const twoFingerPan = Gesture.Pan()
+      .minPointers(2)
+      .maxPointers(2)
+      .averageTouches(true)
+      .minDistance(2)
+      .runOnJS(true)
+      .onBegin((e) => {
+        dragLock.current += 1
+        panLast.current = { x: e.translationX, y: e.translationY }
+      })
+      .onFinalize(() => {
+        dragLock.current = Math.max(0, dragLock.current - 1)
+      })
+      .onUpdate((e) => {
+        const dx = e.translationX - panLast.current.x
+        const dy = e.translationY - panLast.current.y
+        panLast.current = { x: e.translationX, y: e.translationY }
+        stage.current?.panBy(dx, dy)
+      })
+
+    const mousePan = Gesture.Pan()
+      .mouseButton(MouseButton.MIDDLE | MouseButton.RIGHT)
+      .minDistance(12)
+      .runOnJS(true)
+      .onBegin(() => {
+        dragLock.current += 1
+        panLast.current = { x: 0, y: 0 }
+      })
+      .onFinalize(() => {
+        dragLock.current = Math.max(0, dragLock.current - 1)
+      })
+      .onUpdate((e) => {
+        const dx = e.translationX - panLast.current.x
+        const dy = e.translationY - panLast.current.y
+        panLast.current = { x: e.translationX, y: e.translationY }
+        stage.current?.panBy(dx, dy)
+      })
+
+    const orbit = Gesture.Pan()
+      .minPointers(1)
+      .maxPointers(1)
+      .mouseButton(MouseButton.LEFT)
+      .minDistance(4)
+      .runOnJS(true)
+      .onBegin(() => {
+        dragLock.current += 1
+        orbitLast.current = { x: 0, y: 0 }
+      })
+      .onFinalize(() => {
+        dragLock.current = Math.max(0, dragLock.current - 1)
+      })
+      .onUpdate((e) => {
+        const dx = e.translationX - orbitLast.current.x
+        const dy = e.translationY - orbitLast.current.y
+        orbitLast.current = { x: e.translationX, y: e.translationY }
+        // Host mouse wheels on Android emulators are injected as vertical mouse
+        // motion, not ACTION_SCROLL. Keep finger pitch as orbit.
+        if (e.pointerType === PointerType.MOUSE && Math.abs(dy) > Math.abs(dx) * 2 + 1) {
+          stage.current?.zoomBy(wheelFactor(dy))
+          return
+        }
+        stage.current?.orbitBy(dx, dy)
+      })
+
+    const tap = Gesture.Tap()
+      .maxDuration(280)
+      .maxDistance(10)
+      .runOnJS(true)
+      .onEnd((e) => {
+        hitAt(e.x, e.y, e.absoluteX, e.absoluteY, 'tap')
+      })
+
+    const hold = Gesture.LongPress()
+      .minDuration(480)
+      .maxDistance(12)
+      .runOnJS(true)
+      .onStart((e) => {
+        hitAt(e.x, e.y, e.absoluteX, e.absoluteY, 'hold')
+      })
+
+    const nativeWheel = Gesture.Native()
+      .requireExternalGestureToFail(orbit)
+      .requireExternalGestureToFail(mousePan)
+      .requireExternalGestureToFail(twoFingerPan)
+      .requireExternalGestureToFail(pinch)
+      .requireExternalGestureToFail(hold)
+      .requireExternalGestureToFail(tap)
+
+    return Gesture.Simultaneous(
+      pinch,
+      twoFingerPan,
+      Gesture.Exclusive(orbit, mousePan, hold, tap),
+      nativeWheel,
+    )
+  }, [])
 
   useEffect(() => {
     return () => {
       stage.current?.dispose()
       stage.current = null
-      if (holdTimer.current) clearTimeout(holdTimer.current)
     }
   }, [])
 
-  const responder = useRef(
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponderCapture: () => true,
-      onPanResponderTerminationRequest: () => true,
-      onPanResponderGrant: (e) => {
-        const n = e.nativeEvent
-        press.current = {
-          x: n.locationX,
-          y: n.locationY,
-          lastX: n.locationX,
-          lastY: n.locationY,
-          pageX: n.pageX,
-          pageY: n.pageY,
-          moved: false,
-          held: false,
-        }
-        if (holdTimer.current) clearTimeout(holdTimer.current)
-        holdTimer.current = setTimeout(() => {
-          holdTimer.current = null
-          const p = press.current
-          if (!p || p.moved) return
-          p.held = true
-          const hit = stage.current?.pick(p.x, p.y)
-          if (hit?.kind === 'unit' && useCorridor.getState().mode === 'build') {
-            useCorridor.getState().openContextMenu(hit.id, p.pageX, p.pageY)
-          }
-        }, 500)
-      },
-      onPanResponderMove: (e) => {
-        const n = e.nativeEvent
-        const touches = n.touches
-        if (touches && touches.length >= 2) {
-          const a = touches[0]
-          const b = touches[1]
-          const d = Math.hypot(a.pageX - b.pageX, a.pageY - b.pageY)
-          const mx = (a.pageX + b.pageX) / 2
-          const my = (a.pageY + b.pageY) / 2
-          if (pinchDist.current && pinchDist.current > 8) {
-            const zoom = d / pinchDist.current
-            if (Number.isFinite(zoom) && Math.abs(zoom - 1) > 0.001) stage.current?.zoomBy(zoom)
-          }
-          if (pinchMid.current) {
-            stage.current?.panBy(mx - pinchMid.current.x, my - pinchMid.current.y)
-          }
-          pinchDist.current = d
-          pinchMid.current = { x: mx, y: my }
-          const p = press.current
-          if (p) p.moved = true
-          if (holdTimer.current) {
-            clearTimeout(holdTimer.current)
-            holdTimer.current = null
-          }
-          return
-        }
-        pinchDist.current = null
-        pinchMid.current = null
-        const p = press.current
-        if (!p) return
-        const dx = n.locationX - p.lastX
-        const dy = n.locationY - p.lastY
-        p.lastX = n.locationX
-        p.lastY = n.locationY
-        if (!p.moved && Math.hypot(n.locationX - p.x, n.locationY - p.y) > 8) {
-          p.moved = true
-          if (holdTimer.current) {
-            clearTimeout(holdTimer.current)
-            holdTimer.current = null
-          }
-        }
-        if (p.moved) stage.current?.orbitBy(dx, dy)
-      },
-      onPanResponderRelease: () => {
-        pinchDist.current = null
-        pinchMid.current = null
-        if (holdTimer.current) {
-          clearTimeout(holdTimer.current)
-          holdTimer.current = null
-        }
-        const p = press.current
-        press.current = null
-        if (!p || p.moved || p.held) return
-        const hit = stage.current?.pick(p.x, p.y)
-        const st = useCorridor.getState()
-        if (hit?.kind === 'unit' && st.mode === 'build') st.select({ kind: 'unit', id: hit.id })
-        else if (hit?.kind === 'lane' && st.mode === 'operate') st.requestLane(hit.id)
-      },
-      onPanResponderTerminate: () => {
-        pinchDist.current = null
-        pinchMid.current = null
-        if (holdTimer.current) {
-          clearTimeout(holdTimer.current)
-          holdTimer.current = null
-        }
-        press.current = null
-      },
-    }),
-  ).current
+  useEffect(() => {
+    const id = setInterval(() => {
+      const info = stage.current?.cameraInfo()
+      if (!info) return
+      const next = fmtHud(info)
+      setHud((prev) => (prev === next ? prev : next))
+    }, 180)
+    return () => clearInterval(id)
+  }, [])
+
+  const wheelProps = {
+    onWheel: (e: { nativeEvent?: { deltaY?: number }; preventDefault?: () => void }) => {
+      e.preventDefault?.()
+      applyWheel(e.nativeEvent?.deltaY ?? 0)
+    },
+  } as object
 
   if (error) {
     return (
@@ -148,6 +216,53 @@ export function StageCanvas({ onMiss }: { onMiss: () => void }) {
     )
   }
 
+  const hitChild =
+    Platform.OS !== 'web' && stageH > 8 ? (
+      <GHScrollView
+        ref={scrollRef}
+        style={StyleSheet.absoluteFill}
+        contentContainerStyle={{ height: stageH * 3 }}
+        showsVerticalScrollIndicator={false}
+        scrollEventThrottle={16}
+        overScrollMode="never"
+        bounces={false}
+        nestedScrollEnabled
+        disableIntervalMomentum
+        keyboardShouldPersistTaps="always"
+        testID="stage.wheel"
+        accessibilityLabel="Mouse wheel zoom"
+        collapsable={false}
+        {...wheelProps}
+        onScroll={(e) => {
+          if (ignoreScroll.current || dragLock.current > 0) return
+          const y = e.nativeEvent.contentOffset.y
+          const dy = y - scrollMid.current
+          if (Math.abs(dy) < 0.5) return
+          applyWheel(dy)
+          ignoreScroll.current = true
+          scrollRef.current?.scrollTo({ y: scrollMid.current, animated: false })
+          requestAnimationFrame(() => {
+            ignoreScroll.current = false
+          })
+        }}
+      >
+        <View
+          style={{ height: stageH * 3 }}
+          collapsable={false}
+          testID="stage.hit"
+          accessibilityLabel="3D stage"
+        />
+      </GHScrollView>
+    ) : (
+      <View
+        style={StyleSheet.absoluteFill}
+        collapsable={false}
+        testID="stage.hit"
+        accessibilityLabel="3D stage"
+        {...wheelProps}
+      />
+    )
+
   return (
     <View
       style={StyleSheet.absoluteFill}
@@ -155,13 +270,19 @@ export function StageCanvas({ onMiss }: { onMiss: () => void }) {
         const { width, height } = e.nativeEvent.layout
         size.current = { width, height }
         stage.current?.setViewSize(width, height)
+        scrollMid.current = height
+        setStageH(height)
+        requestAnimationFrame(() => {
+          scrollRef.current?.scrollTo({ y: height, animated: false })
+        })
         if (width > 0 && !ready) setReady(true)
       }}
     >
       {ready && (
         <GLView
-          key="stage-gl-v3"
+          key="stage-gl-v5"
           style={StyleSheet.absoluteFill}
+          pointerEvents="none"
           onContextCreate={(gl) => {
             try {
               stage.current?.dispose()
@@ -174,7 +295,14 @@ export function StageCanvas({ onMiss }: { onMiss: () => void }) {
           }}
         />
       )}
-      <View style={StyleSheet.absoluteFill} {...responder.panHandlers} />
+      <GestureDetector key="stage-gestures-v5" gesture={composed} userSelect="none">
+        {hitChild}
+      </GestureDetector>
+      <View pointerEvents="none" style={styles.hudWrap}>
+        <Text testID="stage.camera.hud" accessibilityLabel={`camera ${hud}`} style={styles.hud}>
+          {hud}
+        </Text>
+      </View>
     </View>
   )
 }
@@ -182,4 +310,11 @@ export function StageCanvas({ onMiss }: { onMiss: () => void }) {
 const styles = StyleSheet.create({
   fallback: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 },
   msg: { color: '#93a0b0', textAlign: 'center' },
+  hudWrap: { position: 'absolute', left: 10, bottom: 10 },
+  hud: {
+    color: 'rgba(245,245,247,0.72)',
+    fontSize: 11,
+    fontVariant: ['tabular-nums'],
+    fontWeight: '700',
+  },
 })

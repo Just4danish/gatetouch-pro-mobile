@@ -1,9 +1,8 @@
-import AsyncStorage from '@react-native-async-storage/async-storage'
 import { create } from 'zustand'
+import { loadInstallations, replaceInstallations } from '../lib/installationsDb'
 import {
   ACCESSIBLE_MIN_MM,
   CATALOG,
-  GAP_DEFAULT_CLEARANCE_MM,
   GAP_SPAN_MM,
   LANE_COLORS,
   LED_DEFAULT,
@@ -14,13 +13,33 @@ import {
   type UnitType,
   type WingId,
 } from '../model/catalog'
-import { TEMPLATES } from '../model/templates'
+import {
+  DEFAULT_CLEAR_MM,
+  SCHEMA_VERSION,
+  formatClearCm,
+  insertIndexInGroup,
+  installationDisplayName,
+  makeLaneGroup,
+  migrateDoc,
+  migrateSavedEntry,
+  nextGroupName,
+  unitsForRecipe,
+  unitsOfGroup,
+  wingOnSide,
+  type LaneGroup,
+  type LaneGroupRecipe,
+  type WidthAnchor,
+} from '../model/installation'
+
+export type { LaneGroup, LaneGroupRecipe, WidthAnchor }
+export { formatClearCm, SCHEMA_VERSION }
 
 /* ------------------------------------------------------------------ types --- */
 
 export interface PlacedUnit {
   id: string
   type: UnitType
+  groupId: string
   /** rotated 180° so the wing sits on the other face */
   flipped?: boolean
   led?: LedConfig | null
@@ -40,6 +59,7 @@ export interface Lane {
   id: string
   name: string
   color: string
+  groupId?: string
   members: WingRef[]
   /** runtime state, never part of undo history */
   open: boolean
@@ -50,6 +70,8 @@ export interface Lane {
   /** auto-close delay for badge mode (s) */
   holdSec: number
   led?: LedConfig | null
+  /** Intended clear width (mm). Geometry uses the gap when the lane sits between cabinets. */
+  clearMm: number
 }
 
 export type Mode = 'build' | 'operate'
@@ -57,7 +79,7 @@ export type Mode = 'build' | 'operate'
 /** 'off' loads no character GLBs at all; each level above fetches more. */
 export type CrowdLevel = 'off' | 'few' | 'busy'
 
-export type Selection = { kind: 'unit' | 'lane'; id: string } | null
+export type Selection = { kind: 'unit' | 'lane' | 'group'; id: string } | null
 
 export interface ContextMenuState {
   unitId: string
@@ -76,15 +98,22 @@ export interface SavedCorridor {
   name: string
   savedAt: number
   thumb: string | null
+  schemaVersion?: number
   doc: Doc
 }
 
+/** Alias — saved layouts are Installations. */
+export type SavedInstallation = SavedCorridor
+
 /** The undoable document. */
 export interface Doc {
+  schemaVersion: number
   name: string
+  laneGroups: LaneGroup[]
+  activeGroupId: string | null
   units: PlacedUnit[]
   lanes: Lane[]
-  /** clear gap in mm after the unit with this id */
+  /** clear gap in mm after the unit with this id (clear width between inside faces) */
   gaps: Record<string, number>
   led: LedConfig
   finish: FinishId
@@ -102,6 +131,10 @@ interface State extends Doc {
   selectedLaneIds: string[]
   contextMenu: ContextMenuState | null
   camCmd: CamCmd | null
+  placingType: UnitType | null
+  multiSelectMode: boolean
+  widthAnchor: WidthAnchor
+  buildTab: 'groups' | 'equipment' | 'appearance'
 
   past: Doc[]
   future: Doc[]
@@ -116,13 +149,33 @@ interface State extends Doc {
 
   /* units */
   addUnit: (t: UnitType) => void
-  insertUnit: (t: UnitType, index?: number) => void
+  insertUnit: (t: UnitType, index?: number, groupId?: string) => string
   removeUnit: (id: string) => void
   removeMany: (ids: string[]) => void
   duplicateMany: (ids: string[]) => void
   flipUnit: (id: string) => void
   reorder: (from: number, to: number) => void
   nudgeUnit: (id: string, dir: -1 | 1) => void
+  alignUnits: (ids: string[]) => void
+  swapUnits: (a: string, b: string) => void
+
+  /* lane groups */
+  createLaneGroup: (name?: string) => string
+  selectLaneGroup: (id: string | null) => void
+  renameLaneGroup: (id: string, name: string) => void
+  setGroupDefaultClear: (id: string, mm: number) => void
+  setGroupDirection: (id: string, d: LaneDirection) => void
+  moveLaneGroup: (id: string, dx: number, dz: number) => void
+  rotateLaneGroup: (id: string, delta: number) => void
+  duplicateLaneGroup: (id: string) => void
+  deleteLaneGroup: (id: string) => void
+  generateLaneGroup: (recipe: LaneGroupRecipe) => void
+  setBuildTab: (t: 'groups' | 'equipment' | 'appearance') => void
+  setPlacingType: (t: UnitType | null) => void
+  setMultiSelectMode: (v: boolean) => void
+  setWidthAnchor: (a: WidthAnchor) => void
+  setClearWidthBetween: (leftId: string, rightId: string, mm: number) => void
+  fitSelection: () => void
 
   /* selection */
   select: (s: Selection) => void
@@ -139,6 +192,7 @@ interface State extends Doc {
   autoLanes: () => void
   toggleLaneSelected: (id: string) => void
   mergeSelectedLanes: () => void
+  mergeAdjacentLanes: (aId: string, bId: string) => void
   splitLane: (id: string) => void
   renameLane: (id: string, name: string) => void
   setLaneMode: (id: string, m: LaneMode) => void
@@ -171,19 +225,19 @@ interface State extends Doc {
   /* history + library */
   undo: () => void
   redo: () => void
-  applyTemplate: (id: string) => void
   saveToLibrary: () => void
   loadFromLibrary: (id: string) => void
+  duplicateFromLibrary: (id: string) => void
+  renameLibraryEntry: (id: string, name: string) => void
   deleteFromLibrary: (id: string) => void
   reset: () => void
-  /** Load library from AsyncStorage once at startup. */
+  /** Load library from local SQLite once at startup. */
   hydrate: () => Promise<void>
   libraryHydrated: boolean
 }
 
 /* -------------------------------------------------------------- utilities --- */
 
-const LIB_KEY = 'gatetouch_library_v1'
 let uid = 0
 const newId = (p: string) => `${p}_${Date.now().toString(36)}_${(uid++).toString(36)}`
 
@@ -199,8 +253,10 @@ export function minGapMm(left: PlacedUnit, right: PlacedUnit): number {
 export function maxGapMm(left: PlacedUnit, right: PlacedUnit): number {
   return minGapMm(left, right) + GAP_SPAN_MM
 }
-export function defaultGapMm(left: PlacedUnit, right: PlacedUnit): number {
-  return minGapMm(left, right) + GAP_DEFAULT_CLEARANCE_MM
+export function defaultGapMm(left: PlacedUnit, right: PlacedUnit, preferredMm = DEFAULT_CLEAR_MM): number {
+  const lo = minGapMm(left, right)
+  const hi = maxGapMm(left, right)
+  return Math.max(lo, Math.min(hi, preferredMm))
 }
 
 /** Resolved clear gap after units[i], honouring overrides and clamping. */
@@ -263,8 +319,8 @@ export function laneClearMm(
   lane: Lane,
   units: PlacedUnit[],
   gaps: Record<string, number>,
-): number | null {
-  return laneGap(lane, units, gaps)?.value ?? null
+): number {
+  return laneGap(lane, units, gaps)?.value ?? lane.clearMm ?? DEFAULT_CLEAR_MM
 }
 
 function wingsOf(u: PlacedUnit): WingRef[] {
@@ -275,11 +331,12 @@ export function allWings(units: PlacedUnit[]): WingRef[] {
   return units.flatMap(wingsOf)
 }
 
-function baseLane(members: WingRef[], i: number): Lane {
+function baseLane(members: WingRef[], i: number, groupId?: string): Lane {
   return {
     id: newId('lane'),
     name: `Lane ${i + 1}`,
     color: LANE_COLORS[i % LANE_COLORS.length],
+    groupId,
     members,
     open: false,
     openedAt: null,
@@ -288,11 +345,19 @@ function baseLane(members: WingRef[], i: number): Lane {
     accessible: false,
     holdSec: 4,
     led: null,
+    clearMm: DEFAULT_CLEAR_MM,
   }
 }
 
-function lanesPerWing(units: PlacedUnit[]): Lane[] {
-  return allWings(units).map((w, i) => baseLane([w], i))
+function orderLanes(lanes: Lane[], units: PlacedUnit[]): Lane[] {
+  const idx = new Map(units.map((u, i) => [u.id, i]))
+  const wingRank = (w: WingId) => (w === 'left' ? 0 : w === 'single' ? 1 : 2)
+  return [...lanes].sort((a, b) => {
+    const ai = Math.min(...a.members.map((m) => idx.get(m.unitId) ?? 999))
+    const bi = Math.min(...b.members.map((m) => idx.get(m.unitId) ?? 999))
+    if (ai !== bi) return ai - bi
+    return wingRank(a.members[0]?.wing ?? 'single') - wingRank(b.members[0]?.wing ?? 'single')
+  })
 }
 
 function renumber(lanes: Lane[]): Lane[] {
@@ -305,24 +370,83 @@ function renumber(lanes: Lane[]): Lane[] {
 
 function pruneLanes(lanes: Lane[], units: PlacedUnit[]): Lane[] {
   const live = new Set(units.map((u) => u.id))
-  return renumber(
-    lanes
-      .map((l) => ({ ...l, members: l.members.filter((m) => live.has(m.unitId)) }))
-      .filter((l) => l.members.length > 0),
+  return lanes
+    .map((l) => ({ ...l, members: l.members.filter((m) => live.has(m.unitId)) }))
+    .filter((l) => l.members.length > 0)
+}
+
+/** One lane per leaf by default. Merged (multi-unit) lanes are kept. */
+function rebuildLanes(units: PlacedUnit[], _groups: LaneGroup[], existing: Lane[]): Lane[] {
+  if (!units.length) return []
+  const kept = pruneLanes(existing, units)
+  const held = new Set(kept.flatMap((l) => l.members.map((m) => `${m.unitId}:${m.wing}`)))
+  const extra: Lane[] = []
+  for (const w of allWings(units)) {
+    if (held.has(`${w.unitId}:${w.wing}`)) continue
+    extra.push(baseLane([w], extra.length, units.find((u) => u.id === w.unitId)?.groupId))
+  }
+  return renumber(orderLanes([...kept, ...extra], units))
+}
+
+function facingPair(left: PlacedUnit, right: PlacedUnit): { left: WingId; right: WingId } | null {
+  const lw = wingOnSide(left.type, left.flipped, 'right')
+  const rw = wingOnSide(right.type, right.flipped, 'left')
+  if (!lw || !rw) return null
+  return { left: lw, right: rw }
+}
+
+/** Two lanes can merge when they are facing leaves on consecutive cabinets. */
+export function canMergeLanes(a: Lane, b: Lane, units: PlacedUnit[]): boolean {
+  if (a.id === b.id) return false
+  const gid = a.groupId && a.groupId === b.groupId ? a.groupId : a.groupId ?? b.groupId
+  const row = gid ? unitsOfGroup(units, gid) : units
+  const idxOf = (id: string) => row.findIndex((u) => u.id === id)
+  const aIds = [...new Set(a.members.map((m) => m.unitId))]
+  const bIds = [...new Set(b.members.map((m) => m.unitId))]
+  if (aIds.some((id) => bIds.includes(id))) return false
+  const aIdx = aIds.map(idxOf).filter((i) => i >= 0).sort((x, y) => x - y)
+  const bIdx = bIds.map(idxOf).filter((i) => i >= 0).sort((x, y) => x - y)
+  if (!aIdx.length || !bIdx.length) return false
+  const aFirst = aIdx[0] < bIdx[0]
+  const loLane = aFirst ? a : b
+  const hiLane = aFirst ? b : a
+  const loMax = aFirst ? aIdx[aIdx.length - 1] : bIdx[bIdx.length - 1]
+  const hiMin = aFirst ? bIdx[0] : aIdx[0]
+  if (hiMin !== loMax + 1) return false
+  const leftU = row[loMax]
+  const rightU = row[hiMin]
+  const pair = facingPair(leftU, rightU)
+  if (!pair) return false
+  return (
+    loLane.members.some((m) => m.unitId === leftU.id && m.wing === pair.left) &&
+    hiLane.members.some((m) => m.unitId === rightU.id && m.wing === pair.right)
   )
 }
 
-function coverOrphans(lanes: Lane[], units: PlacedUnit[]): Lane[] {
-  const held = new Set(lanes.flatMap((l) => l.members.map((m) => `${m.unitId}:${m.wing}`)))
-  const extra: Lane[] = []
-  for (const w of allWings(units)) {
-    if (!held.has(`${w.unitId}:${w.wing}`)) extra.push(baseLane([w], 0))
+export function mergePartner(lane: Lane, lanes: Lane[], units: PlacedUnit[]): Lane | null {
+  return lanes.find((other) => canMergeLanes(lane, other, units)) ?? null
+}
+
+function camFocusUnit(unit: PlacedUnit, world: Layout, n: number): CamCmd {
+  const spec = CATALOG[unit.type]
+  const cx = world.x[unit.id] ?? 0
+  const cz = world.z[unit.id] ?? 0
+  const h = spec.heightMm / 1000
+  const reach = effectiveReach(unit)
+  const spanM = Math.max(spec.bodyMm, spec.depthMm, reach.left + reach.right) / 1000
+  const dist = Math.max(spanM * 1.7, 1.85)
+  return {
+    pos: [cx + dist * 0.42, Math.max(h * 0.72, 1.05), cz + dist * 0.9],
+    target: [cx, h * 0.42, cz],
+    n,
   }
-  return renumber([...lanes, ...extra])
 }
 
 const takeDoc = (s: State): Doc => ({
+  schemaVersion: SCHEMA_VERSION,
   name: s.name,
+  laneGroups: s.laneGroups,
+  activeGroupId: s.activeGroupId,
   units: s.units,
   lanes: s.lanes,
   gaps: s.gaps,
@@ -331,29 +455,88 @@ const takeDoc = (s: State): Doc => ({
   glass: s.glass,
 })
 
+function asDoc(raw: unknown): Doc {
+  const m = migrateDoc(raw)
+  const units = m.units as PlacedUnit[]
+  const mapped = (m.lanes as unknown as Lane[]).map((l) => ({
+    ...baseLane(l.members ?? [], 0, l.groupId),
+    ...l,
+    clearMm: typeof l.clearMm === 'number' ? l.clearMm : DEFAULT_CLEAR_MM,
+    open: false,
+    openedAt: null,
+  }))
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    name: m.name,
+    laneGroups: m.laneGroups,
+    activeGroupId: m.activeGroupId,
+    units,
+    lanes: rebuildLanes(units, m.laneGroups, mapped),
+    gaps: m.gaps,
+    led: (m.led as LedConfig) ?? LED_DEFAULT,
+    finish: (m.finish as FinishId) || 'steel',
+    glass: (m.glass as GlassId) || 'clear',
+  }
+}
+
 async function loadLibrary(): Promise<SavedCorridor[]> {
   try {
-    const raw = await AsyncStorage.getItem(LIB_KEY)
-    return raw ? (JSON.parse(raw) as SavedCorridor[]) : []
+    const rows = await loadInstallations()
+    return rows.map((e) => migrateLibraryItem(e))
   } catch {
     return []
   }
 }
 
+function migrateLibraryItem(raw: unknown): SavedCorridor {
+  const e = migrateSavedEntry(raw)
+  return {
+    id: e.id,
+    name: e.name,
+    savedAt: e.savedAt,
+    thumb: e.thumb,
+    schemaVersion: SCHEMA_VERSION,
+    doc: asDoc(e.doc),
+  }
+}
+
 function persistLibrary(lib: SavedCorridor[]) {
-  void AsyncStorage.setItem(LIB_KEY, JSON.stringify(lib)).catch(() => {
-    /* quota / unavailable — ignore */
+  void replaceInstallations(
+    lib.map((e) => ({
+      id: e.id,
+      name: e.name,
+      savedAt: e.savedAt,
+      thumb: e.thumb,
+      schemaVersion: e.schemaVersion ?? SCHEMA_VERSION,
+      doc: e.doc,
+    })),
+  ).catch((err) => {
+    console.warn('sqlite save failed', err)
   })
 }
 
 const EMPTY: Doc = {
-  name: 'New corridor',
+  schemaVersion: SCHEMA_VERSION,
+  name: 'New installation',
+  laneGroups: [],
+  activeGroupId: null,
   units: [],
   lanes: [],
   gaps: {},
   led: LED_DEFAULT,
   finish: 'steel',
   glass: 'clear',
+}
+
+function ensureGroup(s: Pick<Doc, 'laneGroups' | 'activeGroupId'>): { laneGroups: LaneGroup[]; activeGroupId: string } {
+  if (s.activeGroupId && s.laneGroups.some((g) => g.id === s.activeGroupId)) {
+    return { laneGroups: s.laneGroups, activeGroupId: s.activeGroupId }
+  }
+  if (s.laneGroups.length) {
+    return { laneGroups: s.laneGroups, activeGroupId: s.laneGroups[0].id }
+  }
+  const g = makeLaneGroup(newId('lg'), nextGroupName([]), 0)
+  return { laneGroups: [g], activeGroupId: g.id }
 }
 
 /* ----------------------------------------------------------------- store ---- */
@@ -381,6 +564,10 @@ export const useCorridor = create<State>((set, get) => {
     selectedLaneIds: [],
     contextMenu: null,
     camCmd: null,
+    placingType: null,
+    multiSelectMode: false,
+    widthAnchor: 'right',
+    buildTab: 'groups',
 
     past: [],
     future: [],
@@ -389,12 +576,15 @@ export const useCorridor = create<State>((set, get) => {
 
     hydrate: async () => {
       const library = await loadLibrary()
-      set({ library, libraryHydrated: true })
+      set((s) => {
+        if (s.library.length > library.length) return { libraryHydrated: true }
+        return { library, libraryHydrated: true }
+      })
     },
 
     /* view */
     // drop the selection so the inspector never covers the other mode's dock
-    setMode: (mode) => set({ mode, contextMenu: null, sel: null, multi: [] }),
+    setMode: (mode) => set({ mode, contextMenu: null, sel: null, multi: [], placingType: null, multiSelectMode: false }),
     setEnv: (env) => set({ env }),
     toggleDims: () => set((s) => ({ showDims: !s.showDims })),
     setCrowd: (crowd) => set({ crowd }),
@@ -403,17 +593,42 @@ export const useCorridor = create<State>((set, get) => {
     /* units */
     addUnit: (t) => get().insertUnit(t),
 
-    insertUnit: (t, index) =>
+    insertUnit: (t, index, groupId) => {
+      let created = ''
       edit((s) => {
-        const unit: PlacedUnit = { id: newId(t), type: t }
+        const g = ensureGroup({
+          laneGroups: s.laneGroups,
+          activeGroupId: groupId ?? s.activeGroupId,
+        })
+        const gid = groupId && g.laneGroups.some((x) => x.id === groupId) ? groupId : g.activeGroupId
+        const unit: PlacedUnit = { id: newId(t), type: t, groupId: gid }
+        created = unit.id
         const units = [...s.units]
-        const at = index == null ? units.length : Math.max(0, Math.min(index, units.length))
+        const at = insertIndexInGroup(units, gid, index)
         units.splice(at, 0, unit)
-        return {
-          units,
-          lanes: coverOrphans(s.lanes, units),
+        const group = g.laneGroups.find((x) => x.id === gid)
+        const pref = group?.defaultClearMm ?? DEFAULT_CLEAR_MM
+        const i = units.findIndex((u) => u.id === unit.id)
+        const gaps = { ...s.gaps }
+        if (i > 0 && units[i - 1].groupId === gid) {
+          gaps[units[i - 1].id] = defaultGapMm(units[i - 1], unit, pref)
         }
-      }),
+        if (units[i + 1]?.groupId === gid) {
+          gaps[unit.id] = defaultGapMm(unit, units[i + 1], pref)
+        }
+        const world = computeWorldLayout(units, gaps, g.laneGroups)
+        return {
+          laneGroups: g.laneGroups,
+          activeGroupId: gid,
+          units,
+          lanes: rebuildLanes(units, g.laneGroups, s.lanes),
+          gaps,
+          placingType: null,
+          camCmd: camFocusUnit(unit, world, (s.camCmd?.n ?? 0) + 1),
+        }
+      })
+      return created
+    },
 
     removeUnit: (id) => get().removeMany([id]),
 
@@ -423,7 +638,7 @@ export const useCorridor = create<State>((set, get) => {
         const units = s.units.filter((u) => !kill.has(u.id))
         return {
           units,
-          lanes: pruneLanes(s.lanes, units),
+          lanes: rebuildLanes(units, s.laneGroups, pruneLanes(s.lanes, units)),
           sel: s.sel && kill.has(s.sel.id) ? null : s.sel,
           multi: s.multi.filter((m) => !kill.has(m)),
           contextMenu: null,
@@ -434,7 +649,6 @@ export const useCorridor = create<State>((set, get) => {
       edit((s) => {
         if (!ids.length) return null
         const units = [...s.units]
-        // insert each copy right after its original, walking right-to-left
         const order = ids
           .map((id) => units.findIndex((u) => u.id === id))
           .filter((i) => i >= 0)
@@ -443,14 +657,18 @@ export const useCorridor = create<State>((set, get) => {
           const src = units[i]
           units.splice(i + 1, 0, { ...src, id: newId(src.type) })
         }
-        return { units, lanes: coverOrphans(s.lanes, units), contextMenu: null }
+        return { units, lanes: rebuildLanes(units, s.laneGroups, s.lanes), contextMenu: null }
       }),
 
     flipUnit: (id) =>
-      edit((s) => ({
-        units: s.units.map((u) => (u.id === id ? { ...u, flipped: !u.flipped } : u)),
-        contextMenu: null,
-      })),
+      edit((s) => {
+        const units = s.units.map((u) => (u.id === id ? { ...u, flipped: !u.flipped } : u))
+        return {
+          units,
+          lanes: rebuildLanes(units, s.laneGroups, s.lanes),
+          contextMenu: null,
+        }
+      }),
 
     reorder: (from, to) =>
       edit((s) => {
@@ -459,7 +677,7 @@ export const useCorridor = create<State>((set, get) => {
         const units = [...s.units]
         const [m] = units.splice(from, 1)
         units.splice(to, 0, m)
-        return { units }
+        return { units, lanes: rebuildLanes(units, s.laneGroups, s.lanes) }
       }),
 
     nudgeUnit: (id, dir) =>
@@ -467,13 +685,227 @@ export const useCorridor = create<State>((set, get) => {
         const i = s.units.findIndex((u) => u.id === id)
         const j = i + dir
         if (i < 0 || j < 0 || j >= s.units.length) return null
+        if (s.units[i].groupId !== s.units[j].groupId) return null
         const units = [...s.units]
         ;[units[i], units[j]] = [units[j], units[i]]
-        return { units }
+        return { units, lanes: rebuildLanes(units, s.laneGroups, s.lanes) }
       }),
 
+    alignUnits: (ids) =>
+      edit((s) => {
+        if (ids.length < 2) return null
+        const host = s.units.find((u) => u.id === ids[0])
+        if (!host) return null
+        const units = s.units.map((u) => (ids.includes(u.id) ? { ...u, groupId: host.groupId, flipped: host.flipped } : u))
+        return { units, lanes: rebuildLanes(units, s.laneGroups, s.lanes) }
+      }),
+
+    swapUnits: (a, b) =>
+      edit((s) => {
+        const i = s.units.findIndex((u) => u.id === a)
+        const j = s.units.findIndex((u) => u.id === b)
+        if (i < 0 || j < 0) return null
+        const units = [...s.units]
+        ;[units[i], units[j]] = [units[j], units[i]]
+        return { units, lanes: rebuildLanes(units, s.laneGroups, s.lanes) }
+      }),
+
+    createLaneGroup: (name) => {
+      let created = ''
+      edit((s) => {
+        const g = makeLaneGroup(newId('lg'), name || nextGroupName(s.laneGroups), s.laneGroups.length)
+        created = g.id
+        return {
+          laneGroups: [...s.laneGroups, g],
+          activeGroupId: g.id,
+        }
+      })
+      return created
+    },
+
+    selectLaneGroup: (id) => set({ activeGroupId: id }),
+
+    renameLaneGroup: (id, name) =>
+      edit((s) => ({
+        laneGroups: s.laneGroups.map((g) => (g.id === id ? { ...g, name } : g)),
+      })),
+
+    setGroupDefaultClear: (id, mm) =>
+      edit((s) => {
+        const laneGroups = s.laneGroups.map((g) => (g.id === id ? { ...g, defaultClearMm: mm } : g))
+        const members = unitsOfGroup(s.units, id)
+        const gaps = { ...s.gaps }
+        for (let i = 0; i < members.length - 1; i++) {
+          gaps[members[i].id] = defaultGapMm(members[i], members[i + 1], mm)
+        }
+        return { laneGroups, gaps }
+      }),
+
+    setGroupDirection: (id, direction) =>
+      edit((s) => ({
+        laneGroups: s.laneGroups.map((g) => (g.id === id ? { ...g, direction } : g)),
+        lanes: s.lanes.map((l) => (l.groupId === id ? { ...l, direction } : l)),
+      })),
+
+    moveLaneGroup: (id, dx, dz) =>
+      edit((s) => ({
+        laneGroups: s.laneGroups.map((g) =>
+          g.id === id ? { ...g, originX: g.originX + dx, originZ: g.originZ + dz } : g,
+        ),
+      })),
+
+    rotateLaneGroup: (id, delta) =>
+      edit((s) => ({
+        laneGroups: s.laneGroups.map((g) =>
+          g.id === id ? { ...g, rotationY: g.rotationY + delta } : g,
+        ),
+      })),
+
+    duplicateLaneGroup: (id) =>
+      edit((s) => {
+        const src = s.laneGroups.find((g) => g.id === id)
+        if (!src) return null
+        const g = makeLaneGroup(newId('lg'), `${src.name} copy`, s.laneGroups.length, {
+          rotationY: src.rotationY,
+          defaultClearMm: src.defaultClearMm,
+          direction: src.direction,
+        })
+        const idMap = new Map<string, string>()
+        const copies: PlacedUnit[] = unitsOfGroup(s.units, id).map((u) => {
+          const nid = newId(u.type)
+          idMap.set(u.id, nid)
+          return { ...u, id: nid, groupId: g.id }
+        })
+        const gaps = { ...s.gaps }
+        for (const u of unitsOfGroup(s.units, id)) {
+          const nid = idMap.get(u.id)
+          if (nid && s.gaps[u.id] != null) gaps[nid] = s.gaps[u.id]
+        }
+        const extraLanes: Lane[] = s.lanes
+          .filter((l) => l.groupId === id)
+          .map((l) => ({
+            ...l,
+            id: newId('lane'),
+            groupId: g.id,
+            open: false,
+            openedAt: null,
+            members: l.members
+              .map((m) => {
+                const uid = idMap.get(m.unitId)
+                return uid ? { ...m, unitId: uid } : null
+              })
+              .filter((m): m is WingRef => m != null),
+          }))
+        const units = [...s.units, ...copies]
+        const lanes = rebuildLanes(units, [...s.laneGroups, g], [...s.lanes, ...extraLanes])
+        return {
+          laneGroups: [...s.laneGroups, g],
+          activeGroupId: g.id,
+          units,
+          lanes,
+          gaps,
+          sel: { kind: 'group', id: g.id },
+        }
+      }),
+
+    deleteLaneGroup: (id) =>
+      edit((s) => {
+        const units = s.units.filter((u) => u.groupId !== id)
+        const laneGroups = s.laneGroups.filter((g) => g.id !== id)
+        return {
+          laneGroups,
+          activeGroupId: s.activeGroupId === id ? (laneGroups[0]?.id ?? null) : s.activeGroupId,
+          units,
+          lanes: rebuildLanes(units, laneGroups, s.lanes.filter((l) => l.groupId !== id)),
+          sel: s.sel?.kind === 'group' && s.sel.id === id ? null : s.sel,
+        }
+      }),
+
+    generateLaneGroup: (recipe) =>
+      edit((s) => {
+        const g = makeLaneGroup(newId('lg'), nextGroupName(s.laneGroups), s.laneGroups.length, {
+          defaultClearMm: recipe.standardClearMm,
+        })
+        const units: PlacedUnit[] = [
+          ...s.units,
+          ...unitsForRecipe(recipe).map((u) => ({ id: newId(u.type), type: u.type, flipped: u.flipped, groupId: g.id })),
+        ]
+        const members = unitsOfGroup(units, g.id)
+        const gaps = { ...s.gaps }
+        members.forEach((u, i) => {
+          if (i >= members.length - 1) return
+          const acc = recipe.accessibleLanes?.find((a) => a.index === i)
+          gaps[u.id] = defaultGapMm(members[i], members[i + 1], acc?.clearMm ?? recipe.standardClearMm)
+        })
+        const lanes = rebuildLanes(units, [...s.laneGroups, g], s.lanes).map((l, i) =>
+          recipe.accessibleLanes?.some((a) => a.index === i) ? { ...l, accessible: true } : l,
+        )
+        return {
+          laneGroups: [...s.laneGroups, g],
+          activeGroupId: g.id,
+          units,
+          lanes,
+          gaps,
+          sel: { kind: 'group', id: g.id },
+        }
+      }),
+
+    setBuildTab: (buildTab) => set({ buildTab, placingType: buildTab === 'equipment' ? get().placingType : null }),
+    setPlacingType: (placingType) => set({ placingType }),
+    setMultiSelectMode: (multiSelectMode) => set({ multiSelectMode, multi: multiSelectMode ? get().multi : [] }),
+    setWidthAnchor: (widthAnchor) => set({ widthAnchor }),
+
+    setClearWidthBetween: (leftId, rightId, mm) =>
+      edit((s) => {
+        const gid = s.units.find((u) => u.id === leftId)?.groupId
+        const members = gid ? unitsOfGroup(s.units, gid) : s.units
+        const i = members.findIndex((u) => u.id === leftId)
+        const j = members.findIndex((u) => u.id === rightId)
+        if (i < 0 || j < 0 || Math.abs(i - j) !== 1) return null
+        const left = i < j ? members[i] : members[j]
+        const right = i < j ? members[j] : members[i]
+        const lo = minGapMm(left, right)
+        const hi = maxGapMm(left, right)
+        const next = Math.max(lo, Math.min(hi, mm))
+        const prev = gapAt(members, Math.min(i, j), s.gaps)
+        const deltaM = (next - prev) / 1000
+        const gaps = { ...s.gaps, [left.id]: next }
+        let laneGroups = s.laneGroups
+        if (s.widthAnchor === 'left' || s.widthAnchor === 'both') {
+          const shift = s.widthAnchor === 'both' ? deltaM / 2 : deltaM
+          laneGroups = s.laneGroups.map((g) => (g.id === gid ? { ...g, originX: g.originX - shift } : g))
+        }
+        return { gaps, laneGroups }
+      }),
+
+    fitSelection: () => {
+      const s = get()
+      const world = computeWorldLayout(s.units, s.gaps, s.laneGroups)
+      let ids: string[] = []
+      if (s.sel?.kind === 'unit') ids = [s.sel.id]
+      else if (s.sel?.kind === 'group') ids = unitsOfGroup(s.units, s.sel.id).map((u) => u.id)
+      else if (s.sel?.kind === 'lane') {
+        const lane = s.lanes.find((l) => l.id === s.sel?.id)
+        ids = lane?.members.map((m) => m.unitId) ?? []
+      }
+      if (!ids.length) ids = s.units.map((u) => u.id)
+      const xs = ids.map((id) => world.x[id]).filter((v): v is number => v != null)
+      const zs = ids.map((id) => world.z[id]).filter((v): v is number => v != null)
+      if (!xs.length) return
+      const cx = (Math.min(...xs) + Math.max(...xs)) / 2
+      const cz = (Math.min(...zs) + Math.max(...zs)) / 2
+      const span = Math.max(Math.max(...xs) - Math.min(...xs), 1.2)
+      const d = Math.max(span * 1.55, 4.5)
+      s.flyTo([cx + d * 0.22, d * 0.42, cz + d * 0.95], [cx, 0.5, cz])
+    },
+
     /* selection */
-    select: (sel) => set({ sel, contextMenu: null }),
+    select: (sel) =>
+      set((s) => ({
+        sel,
+        contextMenu: null,
+        activeGroupId: sel?.kind === 'group' ? sel.id : s.activeGroupId,
+      })),
     toggleMulti: (id) =>
       set((s) => ({
         multi: s.multi.includes(id) ? s.multi.filter((x) => x !== id) : [...s.multi, id],
@@ -490,12 +922,14 @@ export const useCorridor = create<State>((set, get) => {
         const lane = s.lanes.find((l) => l.id === laneId)
         if (!lane) return null
         const g = laneGap(lane, s.units, s.gaps)
-        if (!g) return null
-        return { gaps: { ...s.gaps, [g.key]: Math.max(g.min, Math.min(g.max, mm)) } }
+        const lanes = s.lanes.map((l) => (l.id === laneId ? { ...l, clearMm: mm } : l))
+        if (!g) return { lanes }
+        return { lanes, gaps: { ...s.gaps, [g.key]: Math.max(g.min, Math.min(g.max, mm)) } }
       }),
 
     /* lanes */
-    autoLanes: () => edit((s) => ({ lanes: lanesPerWing(s.units), selectedLaneIds: [] })),
+    autoLanes: () =>
+      edit((s) => ({ lanes: rebuildLanes(s.units, s.laneGroups, s.lanes), selectedLaneIds: [] })),
 
     toggleLaneSelected: (id) =>
       set((s) => ({
@@ -513,12 +947,35 @@ export const useCorridor = create<State>((set, get) => {
         const merged: Lane = {
           ...chosen[0],
           id: newId('lane'),
-          name: 'Lane',
+          name: chosen[0].name,
           members: chosen.flatMap((l) => l.members),
           open: false,
           openedAt: null,
         }
-        return { lanes: renumber([...rest, merged]), selectedLaneIds: [] }
+        return { lanes: renumber(orderLanes([...rest, merged], s.units)), selectedLaneIds: [] }
+      }),
+
+    mergeAdjacentLanes: (aId, bId) =>
+      edit((s) => {
+        const a = s.lanes.find((l) => l.id === aId)
+        const b = s.lanes.find((l) => l.id === bId)
+        if (!a || !b || !canMergeLanes(a, b, s.units)) return null
+        const rest = s.lanes.filter((l) => l.id !== aId && l.id !== bId)
+        const merged: Lane = {
+          ...a,
+          id: newId('lane'),
+          name: a.name,
+          members: [...a.members, ...b.members],
+          open: false,
+          openedAt: null,
+          clearMm: a.clearMm ?? DEFAULT_CLEAR_MM,
+        }
+        const next = renumber(orderLanes([...rest, merged], s.units))
+        const g = laneGap(merged, s.units, s.gaps)
+        const gaps = g
+          ? { ...s.gaps, [g.key]: Math.max(g.min, Math.min(g.max, merged.clearMm)) }
+          : s.gaps
+        return { lanes: next, gaps, selectedLaneIds: [] }
       }),
 
     splitLane: (id) =>
@@ -534,7 +991,7 @@ export const useCorridor = create<State>((set, get) => {
           open: false,
           openedAt: null,
         }))
-        return { lanes: renumber([...rest, ...singles]), selectedLaneIds: [] }
+        return { lanes: renumber(orderLanes([...rest, ...singles], s.units)), selectedLaneIds: [] }
       }),
 
     renameLane: (id, name) =>
@@ -663,47 +1120,14 @@ export const useCorridor = create<State>((set, get) => {
         }
       }),
 
-    applyTemplate: (id) =>
-      edit(() => {
-        const t = TEMPLATES.find((x) => x.id === id)
-        if (!t) return null
-        const units: PlacedUnit[] = t.units.map((u) => ({
-          id: newId(u.type),
-          type: u.type,
-          flipped: u.flipped,
-        }))
-        let lanes = lanesPerWing(units)
-        if (t.groups) {
-          const used = new Set<number>()
-          const merged: Lane[] = []
-          for (const g of t.groups) {
-            const members = g.flatMap((wi) => lanes[wi]?.members ?? [])
-            if (!members.length) continue
-            g.forEach((wi) => used.add(wi))
-            merged.push({ ...lanes[g[0]], id: newId('lane'), name: 'Lane', members })
-          }
-          const singles = lanes.filter((_, i) => !used.has(i))
-          lanes = renumber([...singles, ...merged])
-        }
-        if (t.accessible) {
-          lanes = lanes.map((l, i) => (t.accessible!.includes(i) ? { ...l, accessible: true } : l))
-        }
-        const gaps: Record<string, number> = {}
-        lanes.forEach((l) => {
-          if (!l.accessible) return
-          const g = laneGap(l, units, gaps)
-          if (g) gaps[g.key] = Math.min(g.max, Math.max(g.min, ACCESSIBLE_MIN_MM))
-        })
-        return { name: t.label, units, lanes, gaps, sel: null, multi: [], selectedLaneIds: [] }
-      }),
-
     saveToLibrary: () => {
       const s = get()
       const entry: SavedCorridor = {
-        id: newId('corr'),
-        name: s.name,
+        id: newId('inst'),
+        name: installationDisplayName(s.name),
         savedAt: Date.now(),
         thumb: s.capture(),
+        schemaVersion: SCHEMA_VERSION,
         doc: takeDoc(s),
       }
       const library = [entry, ...s.library].slice(0, 12)
@@ -715,14 +1139,39 @@ export const useCorridor = create<State>((set, get) => {
       edit((s) => {
         const e = s.library.find((x) => x.id === id)
         if (!e) return null
+        const doc = asDoc(e.doc)
         return {
-          ...e.doc,
-          lanes: e.doc.lanes.map((l) => ({ ...l, open: false, openedAt: null })),
+          ...doc,
+          lanes: doc.lanes.map((l) => ({ ...l, open: false, openedAt: null })),
           sel: null,
           multi: [],
           selectedLaneIds: [],
+          placingType: null,
         }
       }),
+
+    duplicateFromLibrary: (id) => {
+      const s = get()
+      const e = s.library.find((x) => x.id === id)
+      if (!e) return
+      const entry: SavedCorridor = {
+        ...e,
+        id: newId('inst'),
+        name: `${installationDisplayName(e.name)} copy`,
+        savedAt: Date.now(),
+        schemaVersion: SCHEMA_VERSION,
+        doc: asDoc(e.doc),
+      }
+      const library = [entry, ...s.library].slice(0, 12)
+      persistLibrary(library)
+      set({ library })
+    },
+
+    renameLibraryEntry: (id, name) => {
+      const library = get().library.map((e) => (e.id === id ? { ...e, name } : e))
+      persistLibrary(library)
+      set({ library })
+    },
 
     deleteFromLibrary: (id) => {
       const library = get().library.filter((x) => x.id !== id)
@@ -730,9 +1179,19 @@ export const useCorridor = create<State>((set, get) => {
       set({ library })
     },
 
-    reset: () => edit(() => ({ ...EMPTY, sel: null, multi: [], selectedLaneIds: [] })),
+    reset: () =>
+      edit(() => ({
+        ...EMPTY,
+        sel: null,
+        multi: [],
+        selectedLaneIds: [],
+        placingType: null,
+        multiSelectMode: false,
+      })),
   }
 })
+
+export const useInstallation = useCorridor
 
 /* ------------------------------------------------------- drag (transient) --- */
 // Kept separate from the document so dragging never touches undo history.
@@ -761,11 +1220,16 @@ export const useDrag = create<{
 export interface Layout {
   /** world X of each unit centre (m) */
   x: Record<string, number>
+  z: Record<string, number>
+  rotY: Record<string, number>
   centerX: number
+  centerZ: number
   width: number
   ghostX: number | null
+  ghostZ: number | null
   /** left edge of each unit body (m), for dimension lines */
-  edges: { id: string; left: number; right: number }[]
+  edges: { id: string; left: number; right: number; z: number }[]
+  slots: { index: number; x: number; z: number; groupId: string }[]
 }
 
 /**
@@ -778,12 +1242,14 @@ export function computeLayout(
   ghost?: { index: number; type: UnitType },
 ): Layout {
   const x: Record<string, number> = {}
-  const edges: { id: string; left: number; right: number }[] = []
+  const z: Record<string, number> = {}
+  const rotY: Record<string, number> = {}
+  const edges: { id: string; left: number; right: number; z: number }[] = []
   let cursor = 0
   let ghostX: number | null = null
 
   const ghostUnit: PlacedUnit | null = ghost
-    ? { id: '__ghost', type: ghost.type }
+    ? { id: '__ghost', type: ghost.type, groupId: units[0]?.groupId ?? '' }
     : null
 
   const place = (u: PlacedUnit, isGhost: boolean) => {
@@ -792,7 +1258,9 @@ export function computeLayout(
     if (isGhost) ghostX = cx
     else {
       x[u.id] = cx
-      edges.push({ id: u.id, left: cursor, right: cursor + body })
+      z[u.id] = 0
+      rotY[u.id] = 0
+      edges.push({ id: u.id, left: cursor, right: cursor + body, z: 0 })
     }
     cursor += body
   }
@@ -801,7 +1269,6 @@ export function computeLayout(
   units.forEach((u, i) => {
     if (ghostUnit && ghost!.index === i) seq.push({ u: ghostUnit, ghost: true })
     seq.push({ u, ghost: false })
-    void i
   })
   if (ghostUnit && ghost!.index >= units.length) seq.push({ u: ghostUnit, ghost: true })
 
@@ -814,7 +1281,103 @@ export function computeLayout(
   })
 
   const width = cursor || 1
-  return { x, centerX: width / 2, width, ghostX, edges }
+  return {
+    x,
+    z,
+    rotY,
+    centerX: width / 2,
+    centerZ: 0,
+    width,
+    ghostX,
+    ghostZ: ghostX != null ? 0 : null,
+    edges,
+    slots: [],
+  }
+}
+
+export function computeWorldLayout(
+  units: PlacedUnit[],
+  gaps: Record<string, number>,
+  groups: LaneGroup[],
+  ghost?: { index: number; type: UnitType; groupId: string },
+): Layout {
+  const list = groups.length ? groups : [{ id: 'lg_implicit', originX: 0, originZ: 0, rotationY: 0 } as LaneGroup]
+  const x: Record<string, number> = {}
+  const z: Record<string, number> = {}
+  const rotY: Record<string, number> = {}
+  const edges: Layout['edges'] = []
+  const slots: Layout['slots'] = []
+  let ghostX: number | null = null
+  let ghostZ: number | null = null
+  let minX = Infinity
+  let maxX = -Infinity
+  let minZ = Infinity
+  let maxZ = -Infinity
+
+  for (const g of list) {
+    const members = units.filter((u) => (u.groupId || g.id) === g.id)
+    const gGhost = ghost && ghost.groupId === g.id ? { index: ghost.index, type: ghost.type } : undefined
+    const local = computeLayout(members, gaps, gGhost)
+    const cos = Math.cos(g.rotationY ?? 0)
+    const sin = Math.sin(g.rotationY ?? 0)
+    for (const u of members) {
+      const lx = (local.x[u.id] ?? 0) - local.centerX
+      const wx = g.originX + lx * cos
+      const wz = g.originZ + lx * sin
+      x[u.id] = wx
+      z[u.id] = wz
+      rotY[u.id] = (g.rotationY ?? 0) + (u.flipped ? Math.PI : 0)
+      minX = Math.min(minX, wx)
+      maxX = Math.max(maxX, wx)
+      minZ = Math.min(minZ, wz)
+      maxZ = Math.max(maxZ, wz)
+    }
+    for (const e of local.edges) {
+      const lx = (e.left + e.right) / 2 - local.centerX
+      edges.push({
+        id: e.id,
+        left: g.originX + (e.left - local.centerX) * cos,
+        right: g.originX + (e.right - local.centerX) * cos,
+        z: g.originZ + lx * sin,
+      })
+    }
+    if (local.ghostX != null && gGhost) {
+      const lx = local.ghostX - local.centerX
+      ghostX = g.originX + lx * cos
+      ghostZ = g.originZ + lx * sin
+    }
+    const slotType = ghost?.type ?? 'hg02_center'
+    for (let i = 0; i <= members.length; i++) {
+      const sl = computeLayout(members, gaps, { index: i, type: slotType })
+      if (sl.ghostX == null) continue
+      const lx = sl.ghostX - sl.centerX
+      slots.push({
+        index: i,
+        x: g.originX + lx * cos,
+        z: g.originZ + lx * sin,
+        groupId: g.id,
+      })
+    }
+  }
+
+  if (!Number.isFinite(minX)) {
+    minX = 0
+    maxX = 1
+    minZ = 0
+    maxZ = 0
+  }
+  return {
+    x,
+    z,
+    rotY,
+    centerX: (minX + maxX) / 2,
+    centerZ: (minZ + maxZ) / 2,
+    width: Math.max(maxX - minX, 1),
+    ghostX,
+    ghostZ,
+    edges,
+    slots,
+  }
 }
 
 function defaultOrResolvedGap(
