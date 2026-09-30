@@ -9,6 +9,14 @@ import {
 } from 'react-native-gesture-handler'
 import { GLView } from 'expo-gl'
 import { useCorridor } from '../store/corridor'
+import { useToast } from '../store/toast'
+import { apiErrorMessage } from '../api/client'
+import {
+  serverLaneIdFromUnitId,
+  triggerLaneEntry,
+  triggerLaneExit,
+} from '../api/lane'
+import { buzz, whoosh } from '../lib/feedback'
 import { createNativeStage, type CameraInfo, type NativeStage } from './nativeStage'
 
 // Expo GL is not a full browser WebGL2; Three logs noisy but non-fatal shader notes.
@@ -36,6 +44,8 @@ export function StageCanvas({ onMiss }: { onMiss: () => void }) {
   const [ready, setReady] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [stageH, setStageH] = useState(0)
+  const [glKey, setGlKey] = useState('0x0')
+  const glKeyRef = useRef('0x0')
   const [hud, setHud] = useState('idle r0.00')
   const scrollRef = useRef<GHScrollView>(null)
   const scrollMid = useRef(0)
@@ -66,9 +76,52 @@ export function StageCanvas({ onMiss }: { onMiss: () => void }) {
     if (hit?.kind === 'unit' && st.mode === 'build') {
       if (st.multiSelectMode) st.toggleMulti(hit.id)
       else st.select({ kind: 'unit', id: hit.id })
-    } else if (hit?.kind === 'lane' && st.mode === 'operate') st.requestLane(hit.id)
-    else if (st.placingType) st.insertUnit(st.placingType)
+    } else if (hit?.kind === 'unit' && st.mode === 'operate') {
+      st.setOperateUnitId(hit.id)
+    } else if (hit?.kind === 'laneTrigger' && st.mode === 'operate') {
+      const [laneId, dir] = hit.id.split(':')
+      if (laneId && (dir === 'entry' || dir === 'exit')) {
+        void triggerOperateLane(laneId, dir)
+      }
+    } else if (hit?.kind === 'lane' && st.mode === 'operate') {
+      st.setOperateLaneFocus(hit.id)
+    } else if (st.placingType) st.insertUnit(st.placingType)
     else onMissRef.current()
+  }
+
+  const triggerOperateLane = (laneId: string, dir: 'entry' | 'exit') => {
+    const st = useCorridor.getState()
+    const lane = st.lanes.find((l) => l.id === laneId)
+    // Already open / in hold delay — ignore until the lane closes.
+    if (lane?.open) {
+      buzz()
+      return
+    }
+    let serverLaneId: string | null = null
+    for (const m of lane?.members ?? []) {
+      serverLaneId = serverLaneIdFromUnitId(m.unitId)
+      if (serverLaneId) break
+    }
+    if (!serverLaneId) {
+      buzz()
+      useToast.getState().show('No server lane linked to this selection', 'error')
+      return
+    }
+    st.setOperateLaneFocus(laneId)
+    const unitId =
+      lane?.members[0]?.unitId ??
+      st.operateUnitId ??
+      null
+    const run = dir === 'exit' ? triggerLaneExit(serverLaneId) : triggerLaneEntry(serverLaneId)
+    void run
+      .then(() => {
+        whoosh()
+        if (unitId) st.activateOperateUnit(unitId)
+      })
+      .catch((err) => {
+        buzz()
+        useToast.getState().show(apiErrorMessage(err), 'error')
+      })
   }
 
   const composed = useMemo(() => {
@@ -272,15 +325,25 @@ export function StageCanvas({ onMiss }: { onMiss: () => void }) {
         stage.current?.setViewSize(width, height)
         scrollMid.current = height
         setStageH(height)
+        // Expo GL drawing buffers often stick to the first size; remount on rotate/resize.
+        const nextKey = `${Math.round(width)}x${Math.round(height)}`
+        if (width > 0 && height > 0 && nextKey !== glKeyRef.current) {
+          stage.current?.dispose()
+          stage.current = null
+          glKeyRef.current = nextKey
+          setGlKey(nextKey)
+          setReady(true)
+        } else if (width > 0 && !ready) {
+          setReady(true)
+        }
         requestAnimationFrame(() => {
           scrollRef.current?.scrollTo({ y: height, animated: false })
         })
-        if (width > 0 && !ready) setReady(true)
       }}
     >
-      {ready && (
+      {ready && glKey !== '0x0' && (
         <GLView
-          key="stage-gl-v5"
+          key={glKey}
           style={StyleSheet.absoluteFill}
           pointerEvents="none"
           onContextCreate={(gl) => {

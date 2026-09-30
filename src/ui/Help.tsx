@@ -1,4 +1,14 @@
-import { Image, Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
+import { useState } from 'react'
+import {
+  Image,
+  type ImageSourcePropType,
+  Modal,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import { TURNSTILE_MODELS } from '../model/products'
 import { colors } from '../theme/tokens'
@@ -10,13 +20,36 @@ const HELP_IMGS = {
   build: require('../../assets/help/build.jpg'),
   operate: require('../../assets/help/operate.jpg'),
   lanes: require('../../assets/help/lanes.jpg'),
-  library: require('../../assets/help/library.jpg'),
+}
+
+function HelpFigure({
+  source,
+  onOpen,
+}: {
+  source: ImageSourcePropType
+  onOpen: () => void
+}) {
+  return (
+    <Pressable
+      onPress={() => {
+        tap()
+        onOpen()
+      }}
+      accessibilityRole="imagebutton"
+      accessibilityLabel="View image full screen"
+      accessibilityHint="Opens a larger view of this guide image"
+    >
+      <Image source={source} style={styles.fig} resizeMode="cover" />
+      <Text style={styles.figHint}>Tap to enlarge</Text>
+    </Pressable>
+  )
 }
 
 export function Help({ open, onClose }: { open: boolean; onClose: () => void }) {
   const theme = useTheme((s) => s.theme)
   const c = colors(theme)
   const u = makeUiStyles(c)
+  const [preview, setPreview] = useState<ImageSourcePropType | null>(null)
 
   return (
     <Modal visible={open} animationType="slide" onRequestClose={onClose}>
@@ -47,11 +80,11 @@ export function Help({ open, onClose }: { open: boolean; onClose: () => void }) 
             1. Create a Lane Group, then open it{'\n'}
             2. Keep CAME selected and tap Next{'\n'}
             3. Tap a model, then Add to the group{'\n'}
-            4. Select two units to set Clear Width{'\n'}
+            4. Long-press a unit → Select Multiple, tap a neighbour, then set Clear Width{'\n'}
             5. Switch to Operate and tap a lane
           </Text>
 
-          <Image source={HELP_IMGS.build} style={styles.fig} resizeMode="cover" />
+          <HelpFigure source={HELP_IMGS.build} onOpen={() => setPreview(HELP_IMGS.build)} />
           <Text style={u.hint}>Build: 3D above, wizard below — lane groups, then manufacturer, then models.</Text>
 
           <Text style={u.label}>CAME models</Text>
@@ -62,14 +95,14 @@ export function Help({ open, onClose }: { open: boolean; onClose: () => void }) 
             </View>
           ))}
 
-          <Image source={HELP_IMGS.lanes} style={styles.fig} resizeMode="cover" />
+          <HelpFigure source={HELP_IMGS.lanes} onOpen={() => setPreview(HELP_IMGS.lanes)} />
           <Text style={u.hint}>Lanes are created automatically between neighbouring turnstile units.</Text>
 
-          <Image source={HELP_IMGS.operate} style={styles.fig} resizeMode="cover" />
-          <Text style={u.hint}>Operate: tap a lane card to open or close. Emergency release asks for confirmation.</Text>
-
-          <Image source={HELP_IMGS.library} style={styles.fig} resizeMode="cover" />
-          <Text style={u.hint}>Installation Library loads from SQLite on this device. Save from Build after placing models.</Text>
+          <HelpFigure source={HELP_IMGS.operate} onOpen={() => setPreview(HELP_IMGS.operate)} />
+          <Text style={u.hint}>
+            Operate: tap a lane card to open or close. Fire and emergency alarms need a PIN on the lane group, then
+            slide to confirm.
+          </Text>
 
           <Text style={u.label}>Gestures</Text>
           <Text style={{ color: c.text2, lineHeight: 22 }}>
@@ -81,11 +114,45 @@ export function Help({ open, onClose }: { open: boolean; onClose: () => void }) 
             · Left-drag — orbit{'\n'}
             · Middle- or right-drag — pan{'\n'}
             · Wheel — zoom{'\n'}
-            · Tap a unit — properties{'\n'}
-            · Long-press a unit — Flip, Duplicate, Select Multiple, Remove
+            · Tap a unit — properties (Flip / Remove){'\n'}
+            · Long-press a unit — Properties, Flip, Select Multiple, Remove
           </Text>
         </ScrollView>
       </SafeAreaView>
+
+      <Modal
+        visible={preview != null}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setPreview(null)}
+      >
+        <Pressable
+          style={styles.previewBackdrop}
+          onPress={() => {
+            tap()
+            setPreview(null)
+          }}
+          accessibilityLabel="Close image preview"
+        >
+          <SafeAreaView style={styles.previewSafe} edges={['top', 'left', 'right', 'bottom']}>
+            <View style={styles.previewBar}>
+              <Pressable
+                style={u.ghostBtn}
+                testID="app.help.preview.close"
+                onPress={() => {
+                  tap()
+                  setPreview(null)
+                }}
+              >
+                <Text style={[u.ghostText, { color: '#fff' }]}>Close</Text>
+              </Pressable>
+            </View>
+            {preview != null && (
+              <Image source={preview} style={styles.previewImage} resizeMode="contain" />
+            )}
+          </SafeAreaView>
+        </Pressable>
+      </Modal>
     </Modal>
   )
 }
@@ -103,6 +170,12 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
   fig: { width: '100%', height: 160, borderRadius: 14 },
+  figHint: {
+    marginTop: 4,
+    fontSize: 12,
+    color: '#8E8E93',
+    fontWeight: '600',
+  },
   row: {
     flexDirection: 'row',
     gap: 8,
@@ -110,5 +183,25 @@ const styles = StyleSheet.create({
     minHeight: 44,
     alignItems: 'center',
     borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  previewBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.92)',
+  },
+  previewSafe: {
+    flex: 1,
+  },
+  previewBar: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    paddingHorizontal: 16,
+    paddingTop: 8,
+    paddingBottom: 8,
+  },
+  previewImage: {
+    flex: 1,
+    width: '100%',
+    marginHorizontal: 8,
+    marginBottom: 16,
   },
 })

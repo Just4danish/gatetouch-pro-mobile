@@ -13,6 +13,8 @@
     },
     "android": {
       "package": "com.just4danish.gatetouchpro",
+      "usesCleartextTraffic": true,
+      "softwareKeyboardLayoutMode": "resize",
       "adaptiveIcon": {
         "backgroundColor": "#0e141c",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -35,7 +37,16 @@
           "backgroundColor": "#0e141c"
         }
       ],
-      "expo-sqlite"
+      "expo-sqlite",
+      "expo-secure-store",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ]
     ],
     "extra": {
       "eas": {

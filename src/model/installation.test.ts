@@ -86,5 +86,3 @@ assert(recipe[recipe.length - 1].flipped === true, 'right end flipped')
 const idx = insertIndexInGroup(units, 'g1', 1)
 assert(idx === 1, 'insert at local 1')
 assert(insertIndexInGroup(units, 'missing', 0) === 3, 'unknown group appends')
-
-console.log('installation domain checks ok')

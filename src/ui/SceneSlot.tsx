@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Pressable, StyleSheet, Text, View } from 'react-native'
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native'
 import type { StageCanvas as StageCanvasType } from '../three/StageCanvas'
 
 export function SceneSlot({ onMiss }: { onMiss: () => void }) {
@@ -37,7 +37,14 @@ export function SceneSlot({ onMiss }: { onMiss: () => void }) {
     )
   }
 
-  if (!Canvas3D) return null
+  if (!Canvas3D) {
+    return (
+      <View style={styles.box}>
+        <ActivityIndicator color="#0a84ff" size="large" />
+        <Text style={styles.msg}>Loading 3D stage…</Text>
+      </View>
+    )
+  }
   return <Canvas3D onMiss={onMiss} />
 }
 

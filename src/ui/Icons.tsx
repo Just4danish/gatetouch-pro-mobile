@@ -1,6 +1,8 @@
+import { MaterialCommunityIcons } from '@expo/vector-icons'
 import Svg, { Circle, Path } from 'react-native-svg'
 
 type IconProps = { color: string; size?: number }
+
 
 export function IconSun({ color, size = 20 }: IconProps) {
   return (
@@ -114,10 +116,131 @@ export function IconEye({ color, size = 18 }: IconProps) {
   )
 }
 
+export function IconEyeOff({ color, size = 18 }: IconProps) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <Path
+        d="M3.5 12S7 6.5 12 6.5c1.6 0 3 .4 4.2 1M20.5 12S17 17.5 12 17.5c-1.6 0-3-.4-4.2-1"
+        stroke={color}
+        strokeWidth={1.8}
+        strokeLinecap="round"
+      />
+      <Path d="M10.2 10.3a2.4 2.4 0 0 0 3.5 3.5" stroke={color} strokeWidth={1.8} strokeLinecap="round" />
+      <Path d="M4 4l16 16" stroke={color} strokeWidth={1.8} strokeLinecap="round" />
+    </Svg>
+  )
+}
+
 export function IconChevron({ color, size = 16 }: IconProps) {
   return (
     <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
       <Path d="M9 6l6 6-6 6" stroke={color} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
+    </Svg>
+  )
+}
+
+export function IconMore({ color, size = 18 }: IconProps) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <Circle cx="12" cy="5" r="1.6" fill={color} />
+      <Circle cx="12" cy="12" r="1.6" fill={color} />
+      <Circle cx="12" cy="19" r="1.6" fill={color} />
+    </Svg>
+  )
+}
+
+export function IconPlus({ color, size = 16 }: IconProps) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <Path d="M12 5v14M5 12h14" stroke={color} strokeWidth={2.2} strokeLinecap="round" />
+    </Svg>
+  )
+}
+
+export function IconEmergency({ color, size = 20 }: IconProps) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <Path
+        d="M12 3.5 20.5 19h-17L12 3.5Z"
+        stroke={color}
+        strokeWidth={1.8}
+        strokeLinejoin="round"
+      />
+      <Path d="M12 10v4.2" stroke={color} strokeWidth={1.8} strokeLinecap="round" />
+      <Circle cx="12" cy="16.6" r="1" fill={color} />
+    </Svg>
+  )
+}
+
+export function IconFire({ color, size = 20 }: IconProps) {
+  return <MaterialCommunityIcons name="alarm-light" color={color} size={size} />
+}
+
+export function IconUser({ color, size = 20 }: IconProps) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <Circle cx="12" cy="8" r="3.4" stroke={color} strokeWidth={1.8} />
+      <Path
+        d="M5.5 19.2c.9-3.2 3.3-5 6.5-5s5.6 1.8 6.5 5"
+        stroke={color}
+        strokeWidth={1.8}
+        strokeLinecap="round"
+      />
+    </Svg>
+  )
+}
+
+export function IconUsers({ color, size = 20 }: IconProps) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <Circle cx="9" cy="8" r="2.8" stroke={color} strokeWidth={1.8} />
+      <Path
+        d="M3.8 18.5c.7-2.6 2.6-4 5.2-4s4.5 1.4 5.2 4"
+        stroke={color}
+        strokeWidth={1.8}
+        strokeLinecap="round"
+      />
+      <Circle cx="16.5" cy="8.2" r="2.3" stroke={color} strokeWidth={1.8} />
+      <Path
+        d="M14.2 14.2c1.5-.4 2.9-.2 4 1.1.7.8 1.1 1.8 1.3 3.2"
+        stroke={color}
+        strokeWidth={1.8}
+        strokeLinecap="round"
+      />
+    </Svg>
+  )
+}
+
+export function IconLogout({ color, size = 20 }: IconProps) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <Path
+        d="M10 4.5H6.8A2.3 2.3 0 0 0 4.5 6.8v10.4A2.3 2.3 0 0 0 6.8 19.5H10"
+        stroke={color}
+        strokeWidth={1.8}
+        strokeLinecap="round"
+      />
+      <Path
+        d="M10.5 12H20M16.5 8.5 20 12l-3.5 3.5"
+        stroke={color}
+        strokeWidth={1.8}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </Svg>
+  )
+}
+
+export function IconEdit({ color, size = 18 }: IconProps) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <Path
+        d="M4 20h4.2L19.5 8.7a1.8 1.8 0 0 0 0-2.5l-1.7-1.7a1.8 1.8 0 0 0-2.5 0L4 15.8V20Z"
+        stroke={color}
+        strokeWidth={1.8}
+        strokeLinejoin="round"
+      />
+      <Path d="M13.2 6.3l4.5 4.5" stroke={color} strokeWidth={1.8} strokeLinecap="round" />
     </Svg>
   )
 }

@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Image, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native'
 import { Gesture, GestureDetector } from 'react-native-gesture-handler'
 import { runOnJS } from 'react-native-reanimated'
@@ -11,8 +11,12 @@ import { colors } from '../theme/tokens'
 import { useTheme } from '../store/theme'
 import { makeUiStyles } from './uiStyles'
 import { Glass } from './Glass'
-import { chime, tap, thud } from '../lib/feedback'
+import { chime, tap, thud, buzz } from '../lib/feedback'
+import { STAGE_CHROME_LEFT, STAGE_CHROME_TOP } from '../lib/stageFrame'
 import { IconEye, IconFit, IconFront, IconPlan } from './Icons'
+import { useToast } from '../store/toast'
+import { apiErrorMessage } from '../api/client'
+import { flipTurnstileOnServer, deleteTurnstileOnServer } from '../lib/flipTurnstile'
 
 export function DragGhost() {
   const theme = useTheme((s) => s.theme)
@@ -48,16 +52,58 @@ export function ContextMenu() {
   const c = colors(theme)
   const cm = useCorridor((s) => s.contextMenu)
   const close = useCorridor((s) => s.closeContextMenu)
-  const flipUnit = useCorridor((s) => s.flipUnit)
+  const units = useCorridor((s) => s.units)
   const duplicateMany = useCorridor((s) => s.duplicateMany)
-  const removeUnit = useCorridor((s) => s.removeUnit)
   const select = useCorridor((s) => s.select)
+  const showToast = useToast((s) => s.show)
+  const [flipping, setFlipping] = useState(false)
+  const [removing, setRemoving] = useState(false)
   if (!cm) return null
+
+  const unit = units.find((u) => u.id === cm.unitId)
 
   const act = (fn: () => void) => () => {
     tap()
     fn()
     close()
+  }
+
+  const onFlip = () => {
+    if (!unit || flipping) return
+    tap()
+    setFlipping(true)
+    void flipTurnstileOnServer(unit)
+      .then(() => {
+        chime()
+        showToast('Turnstile flipped', 'success')
+        close()
+      })
+      .catch((err) => {
+        buzz()
+        showToast(apiErrorMessage(err), 'error')
+      })
+      .finally(() => {
+        setFlipping(false)
+      })
+  }
+
+  const onRemove = () => {
+    if (!unit || removing) return
+    tap()
+    setRemoving(true)
+    void deleteTurnstileOnServer(unit)
+      .then(() => {
+        chime()
+        showToast('Turnstile removed', 'success')
+        close()
+      })
+      .catch((err) => {
+        buzz()
+        showToast(apiErrorMessage(err), 'error')
+      })
+      .finally(() => {
+        setRemoving(false)
+      })
   }
 
   return (
@@ -86,14 +132,28 @@ export function ContextMenu() {
           >
             <Text style={{ color: c.text }}>Select Multiple</Text>
           </Pressable>
-          <Pressable style={styles.cmItem} onPress={act(() => flipUnit(cm.unitId))}>
-            <Text style={{ color: c.text }}>Flip</Text>
+          <Pressable
+            style={[
+              styles.cmItem,
+              (unit?.flipped || flipping) && { backgroundColor: c.accentTint },
+            ]}
+            testID="build.context.flip"
+            disabled={flipping}
+            onPress={onFlip}
+          >
+            <Text style={{ color: unit?.flipped || flipping ? c.accentFg : c.text }}>
+              {flipping ? 'Flipping…' : 'Flip'}
+            </Text>
           </Pressable>
           <Pressable style={styles.cmItem} onPress={act(() => duplicateMany([cm.unitId]))}>
             <Text style={{ color: c.text }}>Duplicate</Text>
           </Pressable>
-          <Pressable style={styles.cmItem} onPress={act(() => removeUnit(cm.unitId))}>
-            <Text style={{ color: c.redFg }}>Remove</Text>
+          <Pressable
+            style={[styles.cmItem, removing && { opacity: 0.7 }]}
+            disabled={removing}
+            onPress={onRemove}
+          >
+            <Text style={{ color: c.redFg }}>{removing ? 'Removing…' : 'Remove'}</Text>
           </Pressable>
         </View>
       </Pressable>
@@ -221,6 +281,29 @@ export function CameraBar() {
   size.current = box
   win.current = { w: winW, h: winH }
   persist.current = setCamBarPos
+
+  const landscape = winW > winH
+  const orientRef = useRef(landscape)
+  useEffect(() => {
+    if (orientRef.current === landscape) return
+    orientRef.current = landscape
+    setCamBarPos(STAGE_CHROME_LEFT, STAGE_CHROME_TOP)
+  }, [landscape, setCamBarPos])
+
+  // Pull older/misaligned saves onto the same top edge as the Lane groups card.
+  useEffect(() => {
+    if (camBarY > STAGE_CHROME_TOP + 8) {
+      setCamBarPos(Math.max(STAGE_CHROME_LEFT, camBarX), STAGE_CHROME_TOP)
+    }
+  }, [camBarX, camBarY, setCamBarPos])
+
+  useEffect(() => {
+    const maxX = Math.max(STAGE_CHROME_LEFT, winW - box.w - 8)
+    const maxY = Math.max(STAGE_CHROME_TOP, winH - box.h - 120)
+    const nx = Math.min(Math.max(STAGE_CHROME_LEFT, camBarX), maxX)
+    const ny = Math.min(Math.max(STAGE_CHROME_TOP, camBarY), maxY)
+    if (nx !== camBarX || ny !== camBarY) setCamBarPos(nx, ny)
+  }, [winW, winH, box.w, box.h, camBarX, camBarY, setCamBarPos])
 
   const go = (kind: 'fit' | 'plan' | 'front' | 'eye') => {
     tap()

@@ -26,10 +26,12 @@ import {
   unitsForRecipe,
   unitsOfGroup,
   wingOnSide,
+  syncNeighbourLanes,
   type LaneGroup,
   type LaneGroupRecipe,
   type WidthAnchor,
 } from '../model/installation'
+import { delayMsToSec, hydrateUnitsFromServerLanes, normalizePin, owningServerLaneId } from '../api/lane'
 
 export type { LaneGroup, LaneGroupRecipe, WidthAnchor }
 export { formatClearCm, SCHEMA_VERSION }
@@ -42,6 +44,12 @@ export interface PlacedUnit {
   groupId: string
   /** rotated 180° so the wing sits on the other face */
   flipped?: boolean
+  /** Server turnstile id for PATCH/DELETE /api/turnstyles/{id}/. */
+  turnstileId?: string
+  turnstileMake?: string
+  turnstileModel?: string
+  turnstileType?: string
+  turnstileIsLeft?: boolean
   led?: LedConfig | null
   finish?: FinishId | null
   glass?: GlassId | null
@@ -72,6 +80,10 @@ export interface Lane {
   led?: LedConfig | null
   /** Intended clear width (mm). Geometry uses the gap when the lane sits between cabinets. */
   clearMm: number
+  /** Backend GPIO pin for entry trigger (1–28). */
+  entryPin?: number | null
+  /** Backend GPIO pin for exit trigger (1–28). */
+  exitPin?: number | null
 }
 
 export type Mode = 'build' | 'operate'
@@ -129,6 +141,14 @@ interface State extends Doc {
   sel: Selection
   multi: string[]
   selectedLaneIds: string[]
+  /** Operate: turnstile tapped in 3D — shows Allow entry near the gear. */
+  operateUnitId: string | null
+  /** Operate: lane pad tapped — Allow entry opens this lane only. */
+  operateLaneId: string | null
+  /** Operate: Allow entry confirmed — side card focuses this unit's lanes. */
+  operateActiveUnitId: string | null
+  /** Frontend-only visual after a successful fire/emergency alarm trigger. */
+  alarmKind: 'fire' | 'emergency' | null
   contextMenu: ContextMenuState | null
   camCmd: CamCmd | null
   placingType: UnitType | null
@@ -161,10 +181,39 @@ interface State extends Doc {
 
   /* lane groups */
   createLaneGroup: (name?: string) => string
+  syncLaneGroupsFromServer: (
+    rows: Array<{
+      id: string | number
+      name: string
+      emergency_pin?: number | null
+      fire_pin?: number | null
+    }>,
+    serverLanes?: Array<{
+      id: string | number
+      name: string
+      lane_group?: number | string
+      turnstyles?: Array<{
+        make?: string
+        model?: string
+        type?: string
+        is_left?: boolean
+        cabinet_finish?: string | null
+        glass_finish?: string | null
+        led_colour?: string | null
+        led_brightness?: number | null
+        led_pattern?: string | null
+      }>
+      width?: number
+      entry_pin?: number | null
+      exit_pin?: number | null
+      delay?: number | null
+    }>,
+  ) => void
   selectLaneGroup: (id: string | null) => void
   renameLaneGroup: (id: string, name: string) => void
   setGroupDefaultClear: (id: string, mm: number) => void
   setGroupDirection: (id: string, d: LaneDirection) => void
+  setLaneGroupPins: (id: string, emergencyPin: number | null, firePin: number | null) => void
   moveLaneGroup: (id: string, dx: number, dz: number) => void
   rotateLaneGroup: (id: string, delta: number) => void
   duplicateLaneGroup: (id: string) => void
@@ -183,6 +232,11 @@ interface State extends Doc {
   clearMulti: () => void
   openContextMenu: (unitId: string, x: number, y: number) => void
   closeContextMenu: () => void
+  setOperateUnitId: (id: string | null) => void
+  /** Focus a lane pad so Allow entry shows; opens that lane when confirmed. */
+  setOperateLaneFocus: (laneId: string) => void
+  activateOperateUnit: (id: string) => void
+  clearOperateFocus: () => void
 
   /* geometry */
   setGap: (key: string, mm: number) => void
@@ -200,6 +254,12 @@ interface State extends Doc {
   setLaneAccessible: (id: string, v: boolean) => void
   setLaneHold: (id: string, s: number) => void
   setLaneLed: (id: string, led: LedConfig | null) => void
+  /** Update entry/exit pins on local lanes linked to a server lane id (Operate Allow buttons). */
+  setLanePinsByServerId: (
+    serverLaneId: string,
+    entryPin: number | null,
+    exitPin: number | null,
+  ) => void
 
   /* runtime control */
   requestLane: (id: string) => void
@@ -207,6 +267,10 @@ interface State extends Doc {
   openAll: () => void
   closeAll: () => void
   emergencyRelease: () => void
+  /** Frontend-only: open active-group gates + tint glow after a successful fire/emergency API. */
+  applyAlarmOpen: (kind: 'fire' | 'emergency') => void
+  /** Frontend-only: clear alarm frame and close active-group gates (no API). */
+  clearAlarm: () => void
   tick: () => void
 
   /* appearance */
@@ -343,9 +407,11 @@ function baseLane(members: WingRef[], i: number, groupId?: string): Lane {
     mode: 'badge',
     direction: 'both',
     accessible: false,
-    holdSec: 4,
+    holdSec: 5,
     led: null,
     clearMm: DEFAULT_CLEAR_MM,
+    entryPin: null,
+    exitPin: null,
   }
 }
 
@@ -375,17 +441,71 @@ function pruneLanes(lanes: Lane[], units: PlacedUnit[]): Lane[] {
     .filter((l) => l.members.length > 0)
 }
 
-/** One lane per leaf by default. Merged (multi-unit) lanes are kept. */
-function rebuildLanes(units: PlacedUnit[], _groups: LaneGroup[], existing: Lane[]): Lane[] {
+/** Map backend entry/exit pins + delay onto local neighbour-passage lanes. */
+function applyServerLanePins(
+  lanes: Lane[],
+  serverLanes: Array<{
+    id: string | number
+    entry_pin?: number | null
+    exit_pin?: number | null
+    delay?: number | null
+  }>,
+): Lane[] {
+  const metaByServerId = new Map(
+    serverLanes.map((l) => [
+      String(l.id),
+      {
+        entryPin: normalizePin(l.entry_pin),
+        exitPin: normalizePin(l.exit_pin),
+        holdSec: (() => {
+          const sec = delayMsToSec(l.delay)
+          return sec != null && sec > 0 ? sec : null
+        })(),
+      },
+    ]),
+  )
+  return lanes.map((lane) => {
+    const sid = owningServerLaneId(lane.members)
+    if (!sid) return lane
+    const meta = metaByServerId.get(sid)
+    if (!meta) return lane
+    return {
+      ...lane,
+      entryPin: meta.entryPin,
+      exitPin: meta.exitPin,
+      holdSec: meta.holdSec ?? lane.holdSec,
+    }
+  })
+}
+
+/** One lane per neighbour passage (both facing wings). Unpaired outer wings stay as singles. */
+function rebuildLanes(units: PlacedUnit[], groups: LaneGroup[], existing: Lane[]): Lane[] {
   if (!units.length) return []
   const kept = pruneLanes(existing, units)
-  const held = new Set(kept.flatMap((l) => l.members.map((m) => `${m.unitId}:${m.wing}`)))
-  const extra: Lane[] = []
+  const passages = syncNeighbourLanes(units, groups, kept, (passage, index, reused) => {
+    if (reused) {
+      return {
+        ...reused,
+        members: passage.members,
+        groupId: passage.groupId,
+      }
+    }
+    return baseLane(passage.members, index, passage.groupId)
+  })
+  const held = new Set(passages.flatMap((l) => l.members.map((m) => `${m.unitId}:${m.wing}`)))
+  const extras: Lane[] = []
   for (const w of allWings(units)) {
     if (held.has(`${w.unitId}:${w.wing}`)) continue
-    extra.push(baseLane([w], extra.length, units.find((u) => u.id === w.unitId)?.groupId))
+    const reused = kept.find(
+      (l) => l.members.length === 1 && l.members[0].unitId === w.unitId && l.members[0].wing === w.wing,
+    )
+    extras.push(
+      reused
+        ? { ...reused, members: [w], groupId: units.find((u) => u.id === w.unitId)?.groupId }
+        : baseLane([w], passages.length + extras.length, units.find((u) => u.id === w.unitId)?.groupId),
+    )
   }
-  return renumber(orderLanes([...kept, ...extra], units))
+  return renumber(orderLanes([...passages, ...extras], units))
 }
 
 function facingPair(left: PlacedUnit, right: PlacedUnit): { left: WingId; right: WingId } | null {
@@ -510,9 +630,7 @@ function persistLibrary(lib: SavedCorridor[]) {
       schemaVersion: e.schemaVersion ?? SCHEMA_VERSION,
       doc: e.doc,
     })),
-  ).catch((err) => {
-    console.warn('sqlite save failed', err)
-  })
+  ).catch(() => {})
 }
 
 const EMPTY: Doc = {
@@ -554,7 +672,7 @@ export const useCorridor = create<State>((set, get) => {
 
   return {
     ...EMPTY,
-    mode: 'build',
+    mode: 'operate',
     env: 'lobby',
     showDims: false,
     crowd: 'off',
@@ -562,6 +680,10 @@ export const useCorridor = create<State>((set, get) => {
     sel: null,
     multi: [],
     selectedLaneIds: [],
+    operateUnitId: null,
+    operateLaneId: null,
+    operateActiveUnitId: null,
+    alarmKind: null,
     contextMenu: null,
     camCmd: null,
     placingType: null,
@@ -584,7 +706,19 @@ export const useCorridor = create<State>((set, get) => {
 
     /* view */
     // drop the selection so the inspector never covers the other mode's dock
-    setMode: (mode) => set({ mode, contextMenu: null, sel: null, multi: [], placingType: null, multiSelectMode: false }),
+    setMode: (mode) =>
+      set({
+        mode,
+        contextMenu: null,
+        sel: null,
+        multi: [],
+        placingType: null,
+        multiSelectMode: false,
+        operateUnitId: null,
+        operateLaneId: null,
+        operateActiveUnitId: null,
+        alarmKind: null,
+      }),
     setEnv: (env) => set({ env }),
     toggleDims: () => set((s) => ({ showDims: !s.showDims })),
     setCrowd: (crowd) => set({ crowd }),
@@ -641,6 +775,9 @@ export const useCorridor = create<State>((set, get) => {
           lanes: rebuildLanes(units, s.laneGroups, pruneLanes(s.lanes, units)),
           sel: s.sel && kill.has(s.sel.id) ? null : s.sel,
           multi: s.multi.filter((m) => !kill.has(m)),
+          operateUnitId: s.operateUnitId && kill.has(s.operateUnitId) ? null : s.operateUnitId,
+          operateActiveUnitId:
+            s.operateActiveUnitId && kill.has(s.operateActiveUnitId) ? null : s.operateActiveUnitId,
           contextMenu: null,
         }
       }),
@@ -662,7 +799,12 @@ export const useCorridor = create<State>((set, get) => {
 
     flipUnit: (id) =>
       edit((s) => {
-        const units = s.units.map((u) => (u.id === id ? { ...u, flipped: !u.flipped } : u))
+        const units = s.units.map((u) => {
+          if (u.id !== id) return u
+          const nextLeft =
+            typeof u.turnstileIsLeft === 'boolean' ? !u.turnstileIsLeft : u.turnstileIsLeft
+          return { ...u, flipped: !u.flipped, turnstileIsLeft: nextLeft }
+        })
         return {
           units,
           lanes: rebuildLanes(units, s.laneGroups, s.lanes),
@@ -723,6 +865,68 @@ export const useCorridor = create<State>((set, get) => {
       return created
     },
 
+    syncLaneGroupsFromServer: (rows, serverLanes) => {
+      set((s) => {
+        const prevById = new Map(s.laneGroups.map((g) => [g.id, g]))
+        let laneGroups = rows.map((row, index) => {
+          const id = String(row.id)
+          const prev = prevById.get(id)
+          const emergencyPin =
+            'emergency_pin' in row
+              ? typeof row.emergency_pin === 'number' && row.emergency_pin >= 1
+                ? row.emergency_pin
+                : null
+              : (prev?.emergencyPin ?? null)
+          const firePin =
+            'fire_pin' in row
+              ? typeof row.fire_pin === 'number' && row.fire_pin >= 1
+                ? row.fire_pin
+                : null
+              : (prev?.firePin ?? null)
+          return makeLaneGroup(id, row.name || `Lane Group ${index + 1}`, index, prev
+            ? {
+                originX: prev.originX,
+                originZ: prev.originZ,
+                rotationY: prev.rotationY,
+                defaultClearMm: prev.defaultClearMm,
+                direction: prev.direction,
+                emergencyPin,
+                firePin,
+              }
+            : { emergencyPin, firePin })
+        })
+        const keep = new Set(laneGroups.map((g) => g.id))
+
+        let units = s.units.filter((u) => keep.has(u.groupId))
+        let gaps = Object.fromEntries(Object.entries(s.gaps).filter(([id]) => units.some((u) => u.id === id)))
+
+        if (serverLanes) {
+          const hydrated = hydrateUnitsFromServerLanes(serverLanes)
+          units = hydrated.units.filter((u) => keep.has(u.groupId))
+          gaps = Object.fromEntries(
+            Object.entries(hydrated.gaps).filter(([id]) => units.some((u) => u.id === id)),
+          )
+          laneGroups = laneGroups.map((g) => ({
+            ...g,
+            defaultClearMm: hydrated.groupClearMm[g.id] ?? g.defaultClearMm,
+          }))
+        }
+
+        const rebuilt = rebuildLanes(
+          units,
+          laneGroups,
+          serverLanes ? [] : s.lanes.filter((l) => !l.groupId || keep.has(l.groupId)),
+        )
+        const lanes = serverLanes ? applyServerLanePins(rebuilt, serverLanes) : rebuilt
+        // Prefer current selection; otherwise open the first group in 3D.
+        const activeGroupId =
+          s.activeGroupId && keep.has(s.activeGroupId)
+            ? s.activeGroupId
+            : laneGroups[0]?.id ?? null
+        return { laneGroups, units, lanes, gaps, activeGroupId }
+      })
+    },
+
     selectLaneGroup: (id) => set({ activeGroupId: id }),
 
     renameLaneGroup: (id, name) =>
@@ -745,6 +949,20 @@ export const useCorridor = create<State>((set, get) => {
       edit((s) => ({
         laneGroups: s.laneGroups.map((g) => (g.id === id ? { ...g, direction } : g)),
         lanes: s.lanes.map((l) => (l.groupId === id ? { ...l, direction } : l)),
+      })),
+
+    setLaneGroupPins: (id, emergencyPin, firePin) =>
+      set((s) => ({
+        laneGroups: s.laneGroups.map((g) =>
+          g.id === id
+            ? {
+                ...g,
+                emergencyPin:
+                  typeof emergencyPin === 'number' && emergencyPin >= 1 ? emergencyPin : null,
+                firePin: typeof firePin === 'number' && firePin >= 1 ? firePin : null,
+              }
+            : g,
+        ),
       })),
 
     moveLaneGroup: (id, dx, dz) =>
@@ -914,6 +1132,41 @@ export const useCorridor = create<State>((set, get) => {
     openContextMenu: (unitId, x, y) => set({ contextMenu: { unitId, x, y } }),
     closeContextMenu: () => set({ contextMenu: null }),
 
+    setOperateUnitId: (id) => set({ operateUnitId: id, operateLaneId: null, operateActiveUnitId: null }),
+
+    setOperateLaneFocus: (laneId) => {
+      const s = get()
+      const lane = s.lanes.find((l) => l.id === laneId)
+      const unitId = lane?.members[0]?.unitId ?? null
+      if (!unitId) return
+      set({ operateUnitId: unitId, operateLaneId: laneId, operateActiveUnitId: null })
+    },
+
+    activateOperateUnit: (id) =>
+      set((s) => {
+        const related = s.operateLaneId
+          ? new Set([s.operateLaneId])
+          : new Set(lanesOfUnit(s.lanes, id).map((l) => l.id))
+        const now = Date.now()
+        const lanes = s.lanes.map((l) => {
+          if (!related.has(l.id)) return l
+          if (l.mode === 'locked' || l.mode === 'noentry') return l
+          // Match lane-card open: badge mode gets a holdSec auto-close timer.
+          if (l.mode === 'badge') {
+            return {
+              ...l,
+              open: true,
+              openedAt: now,
+              holdSec: Number.isFinite(l.holdSec) && l.holdSec > 0 ? l.holdSec : 5,
+            }
+          }
+          return { ...l, open: true, openedAt: null }
+        })
+        return { operateUnitId: id, operateActiveUnitId: id, lanes }
+      }),
+
+    clearOperateFocus: () => set({ operateUnitId: null, operateLaneId: null, operateActiveUnitId: null }),
+
     /* geometry */
     setGap: (key, mm) => edit((s) => ({ gaps: { ...s.gaps, [key]: mm } })),
 
@@ -1031,6 +1284,20 @@ export const useCorridor = create<State>((set, get) => {
     setLaneLed: (id, led) =>
       edit((s) => ({ lanes: s.lanes.map((l) => (l.id === id ? { ...l, led } : l)) })),
 
+    setLanePinsByServerId: (serverLaneId, entryPin, exitPin) =>
+      set((s) => {
+        const entry = normalizePin(entryPin)
+        const exit = normalizePin(exitPin)
+        let changed = false
+        const lanes = s.lanes.map((l) => {
+          if (owningServerLaneId(l.members) !== String(serverLaneId)) return l
+          if (l.entryPin === entry && l.exitPin === exit) return l
+          changed = true
+          return { ...l, entryPin: entry, exitPin: exit }
+        })
+        return changed ? { lanes } : s
+      }),
+
     /* runtime control (never undoable) */
     requestLane: (id) =>
       set((s) => ({
@@ -1049,30 +1316,65 @@ export const useCorridor = create<State>((set, get) => {
 
     openAll: () =>
       set((s) => ({
+        alarmKind: null,
         lanes: s.lanes.map((l) =>
           l.mode === 'locked' || l.mode === 'noentry' ? l : { ...l, open: true, openedAt: null },
         ),
       })),
 
     closeAll: () =>
-      set((s) => ({ lanes: s.lanes.map((l) => ({ ...l, open: false, openedAt: null })) })),
+      set((s) => ({
+        alarmKind: null,
+        lanes: s.lanes.map((l) => ({ ...l, open: false, openedAt: null })),
+      })),
 
     emergencyRelease: () =>
       set((s) => ({
+        alarmKind: null,
         lanes: s.lanes.map((l) => ({ ...l, open: true, openedAt: null, mode: 'free' as LaneMode })),
       })),
+
+    applyAlarmOpen: (kind) =>
+      set((s) => {
+        const gid = s.activeGroupId
+        return {
+          alarmKind: kind,
+          lanes: s.lanes.map((l) => {
+            if (gid && l.groupId && l.groupId !== gid) return l
+            return { ...l, open: true, openedAt: null }
+          }),
+        }
+      }),
+
+    clearAlarm: () =>
+      set((s) => {
+        const gid = s.activeGroupId
+        return {
+          alarmKind: null,
+          lanes: s.lanes.map((l) => {
+            if (gid && l.groupId && l.groupId !== gid) return l
+            return { ...l, open: false, openedAt: null }
+          }),
+        }
+      }),
 
     tick: () => {
       const now = Date.now()
       const s = get()
-      if (!s.lanes.some((l) => l.openedAt != null && now - l.openedAt > l.holdSec * 1000)) return
-      set({
-        lanes: s.lanes.map((l) =>
-          l.openedAt != null && now - l.openedAt > l.holdSec * 1000
-            ? { ...l, open: false, openedAt: null }
-            : l,
-        ),
-      })
+      const expired = (l: Lane) => {
+        if (l.openedAt == null) return false
+        const holdSec = Number.isFinite(l.holdSec) && l.holdSec > 0 ? l.holdSec : 5
+        return now - l.openedAt > holdSec * 1000
+      }
+      if (!s.lanes.some(expired)) return
+      const lanes = s.lanes.map((l) => (expired(l) ? { ...l, open: false, openedAt: null } : l))
+      // When Allow-entry lanes finish their hold, leave the focused ops view.
+      let operateActiveUnitId = s.operateActiveUnitId
+      if (operateActiveUnitId) {
+        const related = lanesOfUnit(lanes, operateActiveUnitId)
+        if (!related.some((l) => l.open)) operateActiveUnitId = null
+      }
+      set({ lanes, operateActiveUnitId })
     },
 
     /* appearance */

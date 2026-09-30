@@ -14,3 +14,12 @@ export function setStageFrame(x: number, y: number, width: number, height: numbe
   stageFrame.width = Math.max(width, 1)
   stageFrame.height = Math.max(height, 1)
 }
+
+/** Landscape build/operate side panel width (dp). */
+export function landscapeSideDockWidth(windowWidth: number) {
+  return Math.min(360, Math.round(windowWidth * 0.36))
+}
+
+/** Shared top inset: camera bar, gear, and landscape Lane groups card. */
+export const STAGE_CHROME_TOP = 8
+export const STAGE_CHROME_LEFT = 12

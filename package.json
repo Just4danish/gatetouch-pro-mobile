@@ -4,6 +4,7 @@
   "main": "index.ts",
   "dependencies": {
     "@expo/metro-runtime": "~57.0.15",
+    "@expo/vector-icons": "^15.0.2",
     "@react-native-async-storage/async-storage": "2.2.0",
     "@react-three/drei": "^10.7.8",
     "@react-three/fiber": "^9.7.0",
@@ -11,9 +12,11 @@
     "expo": "~57.0.23",
     "expo-asset": "~57.0.17",
     "expo-blur": "~57.0.3",
+    "expo-build-properties": "~57.0.21",
     "expo-file-system": "~57.0.7",
     "expo-gl": "~57.0.2",
     "expo-haptics": "~57.0.3",
+    "expo-secure-store": "~57.0.4",
     "expo-splash-screen": "~57.0.9",
     "expo-sqlite": "~57.0.3",
     "expo-status-bar": "~57.0.1",
@@ -47,5 +50,8 @@
     "doctor": "npx expo-doctor"
   },
   "private": true,
-  "packageManager": "pnpm@12.4.2+sha512.08adc6613180275c7c9edada39dcf08c9c61ad4e7eaf330a4f3461f102b0f907423454d117f98e72d47fef0616070644d7bffc973a6a57f5090a6d7c368b07c9"
+  "packageManager": "pnpm@12.4.2+sha512.08adc6613180275c7c9edada39dcf08c9c61ad4e7eaf330a4f3461f102b0f907423454d117f98e72d47fef0616070644d7bffc973a6a57f5090a6d7c368b07c9",
+  "allowScripts": {
+    "sharp@0.33.5": true
+  }
 }

@@ -6,15 +6,19 @@ import { stageFrame } from '../lib/stageFrame'
 import { useTheme } from '../store/theme'
 import {
   computeWorldLayout,
+  laneClearMm,
+  laneGap,
   laneOfWing,
   lanesOfUnit,
   useCorridor,
   useDrag,
+  wingSide,
   wingTargets,
   type Lane,
   type Layout,
   type PlacedUnit,
 } from '../store/corridor'
+import { normalizePin } from '../api/lane'
 import { loadGltf } from './gltfCache'
 
 patchThreeShaders()
@@ -73,7 +77,357 @@ function chaseTexture(): THREE.Texture {
 }
 
 let CHASE_TEX: THREE.Texture | null = null
+const BUTTON_TEX = new Map<string, THREE.CanvasTexture | THREE.DataTexture>()
 const WING_Q = new THREE.Quaternion()
+
+function parseHexColor(hex: string): [number, number, number] {
+  const h = hex.replace('#', '')
+  return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)]
+}
+
+/** Tiny 3×5 glyphs for operate buttons and lane name floor labels. */
+const GLYPHS: Record<string, number[]> = {
+  ' ': [0, 0, 0, 0, 0],
+  A: [2, 5, 7, 5, 5],
+  B: [6, 5, 6, 5, 6],
+  C: [7, 4, 4, 4, 7],
+  D: [6, 5, 5, 5, 6],
+  E: [7, 4, 7, 4, 7],
+  F: [7, 4, 7, 4, 4],
+  G: [7, 4, 5, 5, 7],
+  H: [5, 5, 7, 5, 5],
+  I: [7, 2, 2, 2, 7],
+  J: [1, 1, 1, 5, 7],
+  K: [5, 5, 6, 5, 5],
+  L: [4, 4, 4, 4, 7],
+  M: [5, 7, 7, 5, 5],
+  N: [5, 7, 7, 5, 5],
+  O: [7, 5, 5, 5, 7],
+  P: [7, 5, 7, 4, 4],
+  Q: [7, 5, 5, 7, 1],
+  R: [6, 5, 6, 5, 5],
+  S: [7, 4, 7, 1, 7],
+  T: [7, 2, 2, 2, 2],
+  U: [5, 5, 5, 5, 7],
+  V: [5, 5, 5, 5, 2],
+  W: [5, 5, 5, 7, 5],
+  X: [5, 5, 2, 5, 5],
+  Y: [5, 5, 2, 2, 2],
+  Z: [7, 1, 2, 4, 7],
+  '0': [7, 5, 5, 5, 7],
+  '1': [2, 6, 2, 2, 7],
+  '2': [7, 1, 7, 4, 7],
+  '3': [7, 1, 7, 1, 7],
+  '4': [5, 5, 7, 1, 1],
+  '5': [7, 4, 7, 1, 7],
+  '6': [7, 4, 7, 5, 7],
+  '7': [7, 1, 1, 1, 1],
+  '8': [7, 5, 7, 5, 7],
+  '9': [7, 5, 7, 1, 7],
+  '-': [0, 0, 7, 0, 0],
+}
+
+const LANE_NAME_TEX = new Map<string, THREE.DataTexture>()
+
+function laneNameTexture(name: string, fgHex: string): { tex: THREE.Texture; aspect: number } {
+  const label = name.trim().toUpperCase().slice(0, 16) || 'LANE'
+  const key = `name|${label}|${fgHex}`
+  const cached = LANE_NAME_TEX.get(key)
+  if (cached) {
+    const img = cached.image as { width: number; height: number }
+    return { tex: cached, aspect: img.width / Math.max(1, img.height) }
+  }
+
+  const chars = label.split('').filter((ch) => GLYPHS[ch] != null)
+  const draw = chars.length ? chars : ['L', 'A', 'N', 'E']
+  const gw = 3
+  const gh = 5
+  const scale = 3
+  const gap = 2
+  const padX = 6
+  const padY = 4
+  const w = Math.max(48, padX * 2 + draw.length * (gw * scale + gap) - gap)
+  const h = padY * 2 + gh * scale
+  const data = new Uint8Array(w * h * 4)
+  const [fr, fg, fb] = parseHexColor(fgHex)
+
+  // Soft dark plate behind the letters for readability on light floors.
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const o = (y * w + x) * 4
+      data[o] = 18
+      data[o + 1] = 18
+      data[o + 2] = 22
+      data[o + 3] = 150
+    }
+  }
+
+  const totalW = draw.length * (gw * scale + gap) - gap
+  const startX = Math.floor((w - totalW) / 2)
+  const startY = Math.floor((h - gh * scale) / 2)
+  draw.forEach((ch, i) => {
+    const glyph = GLYPHS[ch]
+    if (!glyph) return
+    const ox = startX + i * (gw * scale + gap)
+    for (let row = 0; row < gh; row++) {
+      const bits = glyph[row]
+      for (let col = 0; col < gw; col++) {
+        if (((bits >> (gw - 1 - col)) & 1) === 0) continue
+        for (let py = 0; py < scale; py++) {
+          for (let px = 0; px < scale; px++) {
+            const x = ox + col * scale + px
+            const y = startY + row * scale + py
+            if (x < 0 || y < 0 || x >= w || y >= h) continue
+            const o = (y * w + x) * 4
+            data[o] = fr
+            data[o + 1] = fg
+            data[o + 2] = fb
+            data[o + 3] = 255
+          }
+        }
+      }
+    }
+  })
+
+  const tex = new THREE.DataTexture(data, w, h, THREE.RGBAFormat)
+  tex.flipY = true
+  tex.needsUpdate = true
+  tex.colorSpace = THREE.SRGBColorSpace
+  LANE_NAME_TEX.set(key, tex)
+  return { tex, aspect: w / h }
+}
+
+/** Straight floor-name line through the middle of each lane passage. */
+function laneNameCenterLine(
+  units: PlacedUnit[],
+  layout: Layout,
+): {
+  alongX: number
+  alongZ: number
+  frontX: number
+  frontZ: number
+  midDist: number
+} | null {
+  if (!units.length) return null
+
+  const first = units[0]
+  const last = units[units.length - 1]
+  const dx = (layout.x[last.id] ?? 0) - (layout.x[first.id] ?? 0)
+  const dz = (layout.z[last.id] ?? 0) - (layout.z[first.id] ?? 0)
+  const span = Math.hypot(dx, dz)
+  const alongX = span > 1e-4 ? dx / span : 1
+  const alongZ = span > 1e-4 ? dz / span : 0
+  // Perpendicular (depth) axis — keep +Z-ish so plan/front agree.
+  let frontX = -alongZ
+  let frontZ = alongX
+  if (frontZ < 0 || (Math.abs(frontZ) < 1e-6 && frontX < 0)) {
+    frontX = -frontX
+    frontZ = -frontZ
+  }
+
+  // Mid-depth of the cabinet row (center of each lane in plan view).
+  let sumMid = 0
+  for (const u of units) {
+    const ux = layout.x[u.id] ?? 0
+    const uz = layout.z[u.id] ?? 0
+    sumMid += ux * frontX + uz * frontZ
+  }
+  const midDist = sumMid / units.length
+  if (!Number.isFinite(midDist)) return null
+
+  return { alongX, alongZ, frontX, frontZ, midDist }
+}
+
+function makeLaneNameLabel(
+  lane: Lane,
+  units: PlacedUnit[],
+  gaps: Record<string, number>,
+  layout: Layout,
+  line: {
+    alongX: number
+    alongZ: number
+    frontX: number
+    frontZ: number
+    midDist: number
+  },
+): THREE.Mesh | null {
+  const pose = lanePassagePose(lane, units, gaps, layout)
+  if (!pose) return null
+
+  const { tex, aspect } = laneNameTexture(lane.name, 'f5f5f7')
+  const labelH = 0.11
+  const labelW = Math.min(pose.width * 0.92, Math.max(0.38, labelH * aspect))
+
+  const mesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(labelW, labelH),
+    new THREE.MeshBasicMaterial({
+      map: tex,
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      toneMapped: false,
+    }),
+  )
+  // Passage center along the row + shared mid-depth → straight line in plan.
+  const along = pose.x * line.alongX + pose.z * line.alongZ
+  mesh.rotation.x = -Math.PI / 2
+  mesh.position.set(
+    along * line.alongX + line.midDist * line.frontX,
+    0.018,
+    along * line.alongZ + line.midDist * line.frontZ,
+  )
+  mesh.userData.laneNameLabel = true
+  mesh.userData.laneId = lane.id
+  return mesh
+}
+
+function buttonTexture(
+  label: string,
+  bgHex: string,
+  fgHex: string,
+  borderHex: string,
+  fillAlpha = 175,
+): THREE.Texture {
+  const key = `v6|${label}|${bgHex}|${fgHex}|${borderHex}|${fillAlpha}`
+  const cached = BUTTON_TEX.get(key)
+  if (cached) return cached
+
+  const w = 128
+  const h = 48
+  const data = new Uint8Array(w * h * 4)
+  const [br, bg, bb] = parseHexColor(bgHex)
+  const [fr, fg, fb] = parseHexColor(fgHex)
+  const [or, og, ob] = parseHexColor(borderHex)
+  // Match chrome Allow entry/exit: borderRadius = height / 2 (full pill).
+  const radius = Math.floor(h / 2)
+  const border = 3
+
+  const cornerOutside = (x: number, y: number, cx: number, cy: number, r: number) =>
+    (x - cx) ** 2 + (y - cy) ** 2 > r * r
+
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const o = (y * w + x) * 4
+      const inOuterCorner =
+        (x < radius && y < radius && cornerOutside(x, y, radius, radius, radius)) ||
+        (x >= w - radius && y < radius && cornerOutside(x, y, w - 1 - radius, radius, radius)) ||
+        (x < radius && y >= h - radius && cornerOutside(x, y, radius, h - 1 - radius, radius)) ||
+        (x >= w - radius &&
+          y >= h - radius &&
+          cornerOutside(x, y, w - 1 - radius, h - 1 - radius, radius))
+      if (inOuterCorner) {
+        data[o + 3] = 0
+        continue
+      }
+
+      const ir = Math.max(0, radius - border)
+      const inInner =
+        x >= border &&
+        y >= border &&
+        x < w - border &&
+        y < h - border &&
+        !(x < border + ir && y < border + ir && cornerOutside(x, y, border + ir, border + ir, ir)) &&
+        !(
+          x >= w - border - ir &&
+          y < border + ir &&
+          cornerOutside(x, y, w - 1 - border - ir, border + ir, ir)
+        ) &&
+        !(
+          x < border + ir &&
+          y >= h - border - ir &&
+          cornerOutside(x, y, border + ir, h - 1 - border - ir, ir)
+        ) &&
+        !(
+          x >= w - border - ir &&
+          y >= h - border - ir &&
+          cornerOutside(x, y, w - 1 - border - ir, h - 1 - border - ir, ir)
+        )
+
+      if (inInner) {
+        data[o] = br
+        data[o + 1] = bg
+        data[o + 2] = bb
+        data[o + 3] = fillAlpha
+      } else {
+        // Fluorescent border ring.
+        data[o] = or
+        data[o + 1] = og
+        data[o + 2] = ob
+        data[o + 3] = 255
+      }
+    }
+  }
+
+  const chars = label.toUpperCase().split('')
+  const gw = 3
+  const gh = 5
+  const scale = 4
+  const gap = 2
+  const totalW = chars.length * (gw * scale + gap) - gap
+  const startX = Math.floor((w - totalW) / 2)
+  const startY = Math.floor((h - gh * scale) / 2)
+  chars.forEach((ch, i) => {
+    const glyph = GLYPHS[ch]
+    if (!glyph) return
+    const ox = startX + i * (gw * scale + gap)
+    for (let row = 0; row < gh; row++) {
+      const bits = glyph[row]
+      for (let col = 0; col < gw; col++) {
+        if (((bits >> (gw - 1 - col)) & 1) === 0) continue
+        for (let py = 0; py < scale; py++) {
+          for (let px = 0; px < scale; px++) {
+            const x = ox + col * scale + px
+            const y = startY + row * scale + py
+            if (x < 0 || y < 0 || x >= w || y >= h) continue
+            const o = (y * w + x) * 4
+            data[o] = fr
+            data[o + 1] = fg
+            data[o + 2] = fb
+            data[o + 3] = 255
+          }
+        }
+      }
+    }
+  })
+
+  const tex = new THREE.DataTexture(data, w, h, THREE.RGBAFormat)
+  // Row 0 is the visual top of the label (same convention as CanvasTexture).
+  tex.flipY = true
+  tex.needsUpdate = true
+  tex.colorSpace = THREE.SRGBColorSpace
+  BUTTON_TEX.set(key, tex)
+  return tex
+}
+
+/** Dark translucent fill; Allow/Entry = green text + LED blue border; Exit = LED blue text + border. */
+const TRIGGER_FILL = '141418'
+const TRIGGER_GREEN = '39ff14'
+/** Same blue as the turnstile top LED ring (`LED_DEFAULT`). */
+const TRIGGER_BLUE = '0a84ff'
+
+function triggerButtonColors(dir: 'entry' | 'exit'): { bg: string; border: string; fg: string } {
+  if (dir === 'exit') {
+    return { bg: TRIGGER_FILL, border: TRIGGER_BLUE, fg: TRIGGER_BLUE }
+  }
+  return { bg: TRIGGER_FILL, border: TRIGGER_BLUE, fg: TRIGGER_GREEN }
+}
+
+function laneOperateButtons(lane: Lane): Array<{ dir: 'entry' | 'exit'; label: string }> {
+  const entry = normalizePin(lane.entryPin)
+  const exit = normalizePin(lane.exitPin)
+  const both = entry != null && exit != null && entry !== exit
+  const buttons: Array<{ dir: 'entry' | 'exit'; label: string }> = []
+  if (both) {
+    buttons.push({ dir: 'entry', label: 'ENTRY' })
+    buttons.push({ dir: 'exit', label: 'EXIT' })
+  } else if (entry != null || exit == null) {
+    // Single control (same pins, entry only, or no pin metadata).
+    buttons.push({ dir: 'entry', label: 'ALLOW' })
+  } else {
+    buttons.push({ dir: 'exit', label: 'EXIT' })
+  }
+  return buttons
+}
 
 /** Closed / open local poses sampled from the GLB clips. Mixer scrubbing is unreliable on Expo GL. */
 const WING_POSES: Record<string, { wing: WingId; closed: THREE.Quaternion; open: THREE.Quaternion }> = {
@@ -316,6 +670,208 @@ function laneCenterX(lane: Lane, xs: Record<string, number>) {
   return pts.reduce((a, b) => a + b, 0) / pts.length
 }
 
+type LanePose = { x: number; z: number; rotY: number; width: number; depth: number; height: number }
+
+/**
+ * Marker pose for a lane: always the middle of the clear passage when a neighbour
+ * gap exists (swing / single-wing lanes still sit in that gap, not under the column).
+ */
+function lanePassagePose(
+  lane: Lane,
+  units: PlacedUnit[],
+  gaps: Record<string, number>,
+  layout: Layout,
+): LanePose | null {
+  const memberUnits = lane.members
+    .map((m) => units.find((u) => u.id === m.unitId))
+    .filter((u): u is PlacedUnit => !!u)
+  if (!memberUnits.length) return null
+
+  const depth = Math.max(...memberUnits.map((u) => CATALOG[u.type].depthMm / 1000), 0.35) * 0.9
+  const height = Math.max(...memberUnits.map((u) => CATALOG[u.type].heightMm / 1000), 1.0)
+  const g = laneGap(lane, units, gaps)
+
+  if (g && units[g.index] && units[g.index + 1]) {
+    const left = units[g.index]
+    const right = units[g.index + 1]
+    const lx = layout.x[left.id] ?? 0
+    const lz = layout.z[left.id] ?? 0
+    const rx = layout.x[right.id] ?? 0
+    const rz = layout.z[right.id] ?? 0
+    const dx = rx - lx
+    const dz = rz - lz
+    const span = Math.hypot(dx, dz) || 1
+    const bodyL = CATALOG[left.type].bodyMm / 1000
+    const bodyR = CATALOG[right.type].bodyMm / 1000
+    const clear = Math.max(span - bodyL / 2 - bodyR / 2, 0.08)
+    const t = (bodyL / 2 + clear / 2) / span
+    return {
+      x: lx + dx * t,
+      z: lz + dz * t,
+      rotY: Math.atan2(dz, dx),
+      width: clear,
+      depth,
+      height,
+    }
+  }
+
+  const clearM = Math.max(laneClearMm(lane, units, gaps) / 1000, 0.08)
+  const u = memberUnits[0]
+  const m = lane.members[0]
+  const ux = layout.x[u.id] ?? 0
+  const uz = layout.z[u.id] ?? 0
+  const rotY = layout.rotY[u.id] ?? 0
+  const body = CATALOG[u.type].bodyMm / 1000
+  // Prefer arm reach for swing / single-wing so the marker sits in the swept passage.
+  const reachMm = CATALOG[u.type].reach[wingSide(u, m.wing) === 'right' ? 'right' : 'left']
+  const passage = Math.max(clearM, reachMm / 1000)
+  const along = wingSide(u, m.wing) === 'right' ? 1 : -1
+  const dist = body / 2 + passage / 2
+  return {
+    x: ux + Math.cos(rotY) * along * dist,
+    z: uz + Math.sin(rotY) * along * dist,
+    rotY,
+    width: passage,
+    depth,
+    height,
+  }
+}
+
+/** Invisible hit volume + soft selection glow (no hard borders). */
+function makeLaneVolume(
+  lane: Lane,
+  units: PlacedUnit[],
+  gaps: Record<string, number>,
+  layout: Layout,
+  selected: boolean,
+): THREE.Group | null {
+  const pose = lanePassagePose(lane, units, gaps, layout)
+  if (!pose) return null
+
+  const look = laneVolumeLook(lane, selected)
+  const group = new THREE.Group()
+  group.position.set(pose.x, 0, pose.z)
+  group.rotation.y = pose.rotY
+  group.userData.laneId = lane.id
+  group.userData.lanePad = true
+
+  const buttons = laneOperateButtons(lane)
+  const hasTriggers = buttons.length > 0
+
+  // Full-height invisible picker (always raycastable).
+  const hit = new THREE.Mesh(
+    new THREE.BoxGeometry(pose.width, pose.height, pose.depth),
+    new THREE.MeshBasicMaterial({
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      depthTest: false,
+      side: THREE.DoubleSide,
+      toneMapped: false,
+    }),
+  )
+  hit.position.y = pose.height / 2
+  hit.userData.pick = { kind: 'lane', id: lane.id }
+  hit.userData.laneId = lane.id
+  group.add(hit)
+
+  // Soft volume glow — transparent selection wash, not a solid cube / border.
+  const glow = new THREE.Mesh(
+    new THREE.BoxGeometry(pose.width * 1.02, pose.height, pose.depth * 1.02),
+    new THREE.MeshBasicMaterial({
+      color: look.color,
+      transparent: true,
+      opacity: look.opacity,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      depthTest: false,
+      side: THREE.DoubleSide,
+      toneMapped: false,
+    }),
+  )
+  glow.position.y = pose.height / 2
+  glow.userData.laneGlow = 'volume'
+  group.add(glow)
+
+  // Soft floor pool — keep quieter than the volume glow.
+  const floorGlow = new THREE.Mesh(
+    new THREE.PlaneGeometry(pose.width * 1.08, pose.depth * 1.08),
+    new THREE.MeshBasicMaterial({
+      color: look.color,
+      transparent: true,
+      opacity: look.opacity * 0.18,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      toneMapped: false,
+    }),
+  )
+  floorGlow.rotation.x = -Math.PI / 2
+  floorGlow.position.y = 0.012
+  floorGlow.userData.laneGlow = 'floor'
+  group.add(floorGlow)
+
+  // Forward-facing operate buttons above the lane passage (billboarded to camera each frame).
+  // Dim + non-pickable while the lane is open / in its hold delay.
+  if (hasTriggers) {
+    const busy = lane.open
+    const btnW = Math.min(0.42, Math.max(0.28, pose.width * 0.42))
+    const btnH = 0.14
+    const y = pose.height + 0.22
+    const gap = 0.06
+    const totalW = buttons.length * btnW + (buttons.length - 1) * gap
+    let x0 = -totalW / 2 + btnW / 2
+    for (const btn of buttons) {
+      const colors = triggerButtonColors(btn.dir)
+      const mesh = new THREE.Mesh(
+        new THREE.PlaneGeometry(btnW, btnH),
+        new THREE.MeshBasicMaterial({
+          map: buttonTexture(btn.label, colors.bg, colors.fg, colors.border),
+          transparent: true,
+          opacity: busy ? 0.35 : 1,
+          depthWrite: false,
+          side: THREE.FrontSide,
+          toneMapped: false,
+        }),
+      )
+      // Sit above the passage centre; orientation is applied in sync via billboard.
+      mesh.position.set(x0, y, 0)
+      if (!busy) {
+        mesh.userData.pick = { kind: 'laneTrigger', id: `${lane.id}:${btn.dir}` }
+        mesh.userData.laneTrigger = btn.dir
+      }
+      mesh.userData.operateBillboard = true
+      group.add(mesh)
+      x0 += btnW + gap
+    }
+  }
+
+  return group
+}
+
+function laneVolumeLook(lane: Lane, selected: boolean) {
+  if (lane.mode === 'locked' || lane.mode === 'noentry') {
+    return { color: '#ffcc66', opacity: selected || lane.open ? 0.1 : 0 }
+  }
+  // Open: clear green wash so barrier state reads in the 3D view.
+  if (lane.open) return { color: '#7dffa6', opacity: 0.12 }
+  // Soft app-like selection glow.
+  if (selected) return { color: '#9ad4ff', opacity: 0.1 }
+  return { color: '#ffffff', opacity: 0 }
+}
+
+function paintLaneGlow(root: THREE.Object3D, lane: Lane, selected: boolean) {
+  const look = laneVolumeLook(lane, selected)
+  root.traverse((o) => {
+    if (!(o instanceof THREE.Mesh)) return
+    if (!o.userData.laneGlow) return
+    if (!(o.material instanceof THREE.MeshBasicMaterial)) return
+    o.material.color.set(look.color)
+    o.material.opacity =
+      o.userData.laneGlow === 'floor' ? look.opacity * 0.18 : look.opacity
+  })
+}
+
 export type CameraAction = 'idle' | 'orbit' | 'pan' | 'zoom'
 
 export type CameraInfo = {
@@ -328,7 +884,10 @@ export type CameraInfo = {
 export type NativeStage = {
   canvas: FakeCanvas
   setViewSize: (w: number, h: number) => void
-  pick: (sx: number, sy: number) => { kind: 'unit' | 'lane' | 'slot'; id: string } | null
+  pick: (
+    sx: number,
+    sy: number,
+  ) => { kind: 'unit' | 'lane' | 'slot' | 'laneTrigger'; id: string } | null
   orbitBy: (dx: number, dy: number) => void
   panBy: (dx: number, dy: number) => void
   zoomBy: (factor: number) => void
@@ -439,6 +998,8 @@ export function createNativeStage(
   const ndc = new THREE.Vector2()
   const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0)
   const hit = new THREE.Vector3()
+  const parentWorldQuat = new THREE.Quaternion()
+  const billboardLocalQuat = new THREE.Quaternion()
   let lastT = performance.now()
   const want = { pos: new THREE.Vector3(3, 2.4, 5), tgt: new THREE.Vector3(0, 0.7, 0), active: true }
   let lastCamN = -1
@@ -470,6 +1031,11 @@ export function createNativeStage(
     viewH = Math.max(h, 1)
     canvas.clientWidth = viewW
     canvas.clientHeight = viewH
+    const bufW = Math.max(gl.drawingBufferWidth || viewW, 1)
+    const bufH = Math.max(gl.drawingBufferHeight || viewH, 1)
+    canvas.width = bufW
+    canvas.height = bufH
+    renderer.setSize(bufW, bufH, false)
     camera.aspect = viewW / viewH
     camera.updateProjectionMatrix()
   }
@@ -482,13 +1048,25 @@ export function createNativeStage(
   function pick(sx: number, sy: number) {
     screenRay(sx, sy)
     const hits = ray.intersectObjects(scene.children, true)
-    for (const h of hits) {
-      let o: THREE.Object3D | null = h.object
+    const readPick = (obj: THREE.Object3D) => {
+      let o: THREE.Object3D | null = obj
       while (o) {
-        const p = o.userData.pick as { kind: 'unit' | 'lane' | 'slot'; id: string } | undefined
+        const p = o.userData.pick as
+          | { kind: 'unit' | 'lane' | 'slot' | 'laneTrigger'; id: string }
+          | undefined
         if (p) return p
         o = o.parent
       }
+      return null
+    }
+    // Prefer lane trigger buttons even if a volume/floor pad is slightly closer.
+    for (const h of hits) {
+      const p = readPick(h.object)
+      if (p?.kind === 'laneTrigger') return p
+    }
+    for (const h of hits) {
+      const p = readPick(h.object)
+      if (p) return p
     }
     onMiss()
     return null
@@ -521,7 +1099,7 @@ export function createNativeStage(
         packs.set(u.id, pack)
         unitsRoot.add(pack.root)
       })
-      .catch((err) => console.warn('GLB load failed', err))
+      .catch(() => {})
       .finally(() => pending.delete(u.id))
   }
 
@@ -578,18 +1156,35 @@ export function createNativeStage(
     if (pack.access) pack.access.visible = unitLanes.some((l) => l.accessible)
   }
 
-  function rebuildExtras(layout: Layout, lanes: Lane[], showDims: boolean, showGhost: boolean, maxDepth: number, mode: string, placing: boolean) {
-    const sig = `${showDims}|${showGhost}|${placing}|${layout.edges.map((e) => e.id).join(',')}|${lanes.map((l) => l.id + l.open + l.mode).join(',')}|${mode}|${layout.slots.map((s) => s.index).join(',')}`
+  function rebuildExtras(
+    layout: Layout,
+    lanes: Lane[],
+    units: PlacedUnit[],
+    gaps: Record<string, number>,
+    showDims: boolean,
+    showGhost: boolean,
+    maxDepth: number,
+    mode: string,
+    placing: boolean,
+    focusLaneId: string | null,
+    hideLaneVolumes: boolean,
+    globalFinish: FinishId,
+    globalLed: LedConfig,
+    theme: 'dark' | 'light',
+  ) {
+    const sig = `${showDims}|${showGhost}|${placing}|${layout.edges.map((e) => `${e.id}:${e.left.toFixed(3)}:${e.right.toFixed(3)}`).join(',')}|${lanes.map((l) => `${l.id}:${l.name}:${l.open}${l.mode}${l.clearMm}:${l.entryPin ?? ''}:${l.exitPin ?? ''}`).join(',')}|${mode}|${focusLaneId ?? ''}|${hideLaneVolumes ? 1 : 0}|${globalFinish}|${globalLed.color}|${theme}|${layout.slots.map((s) => s.index).join(',')}`
     if (sig === extraSig) {
       for (const child of extras.children) {
+        if (!child.userData.lanePad || !child.userData.laneId) continue
         const lane = lanes.find((l) => l.id === child.userData.laneId)
         if (!lane) continue
-        child.position.x = laneCenterX(lane, layout.x)
-        child.position.z = laneCenterX(lane, layout.z)
-        const blocked = lane.mode === 'locked' || lane.mode === 'noentry'
-        const color = blocked ? '#ff9f0a' : lane.open ? '#30d158' : '#ff453a'
-        const mat = (child as THREE.Mesh).material
-        if (mat instanceof THREE.MeshBasicMaterial) mat.color.set(color)
+        const pose = lanePassagePose(lane, units, gaps, layout)
+        const x = pose?.x ?? laneCenterX(lane, layout.x)
+        const z = pose?.z ?? laneCenterX(lane, layout.z)
+        child.position.x = x
+        child.position.z = z
+        if (pose) child.rotation.y = pose.rotY
+        paintLaneGlow(child, lane, focusLaneId === lane.id)
       }
       return
     }
@@ -617,17 +1212,26 @@ export function createNativeStage(
       }
     }
 
-    if (mode === 'operate') {
+    // Floor names — straight line through the middle of each lane (plan + other views).
+    const nameLine = laneNameCenterLine(units, layout)
+    if (nameLine) {
       for (const lane of lanes) {
-        const mesh = new THREE.Mesh(
-          new THREE.RingGeometry(0.1, 0.16, 28),
-          new THREE.MeshBasicMaterial({ color: '#ff453a', transparent: true, opacity: 0.7, side: THREE.DoubleSide }),
+        const label = makeLaneNameLabel(lane, units, gaps, layout, nameLine)
+        if (label) extras.add(label)
+      }
+    }
+
+    // Lane hit volumes in operate mode — skip while alarm frame is the status cue.
+    if (mode === 'operate' && !hideLaneVolumes) {
+      for (const lane of lanes) {
+        const volume = makeLaneVolume(
+          lane,
+          units,
+          gaps,
+          layout,
+          focusLaneId === lane.id,
         )
-        mesh.rotation.x = -Math.PI / 2
-        mesh.position.set(laneCenterX(lane, layout.x), 0.02, laneCenterX(lane, layout.z))
-        mesh.userData.pick = { kind: 'lane', id: lane.id }
-        mesh.userData.laneId = lane.id
-        extras.add(mesh)
+        if (volume) extras.add(volume)
       }
     }
   }
@@ -648,16 +1252,29 @@ export function createNativeStage(
     const drag = useDrag.getState()
     const placing = s.mode === 'build' && s.placingType != null
     const showGhost = (drag.type != null && drag.index != null) || placing
+    const stageUnits = s.activeGroupId
+      ? s.units.filter((u) => u.groupId === s.activeGroupId)
+      : []
+    const stageLanes = s.activeGroupId
+      ? s.lanes.filter((l) => !l.groupId || l.groupId === s.activeGroupId)
+      : []
+    const stageGroups = s.activeGroupId
+      ? s.laneGroups.filter((g) => g.id === s.activeGroupId)
+      : []
     const ghostHint =
       drag.type != null && drag.index != null
-        ? { index: drag.index, type: drag.type, groupId: s.activeGroupId ?? s.laneGroups[0]?.id ?? 'lg_implicit' }
-        : placing
-          ? { index: s.units.filter((u) => u.groupId === (s.activeGroupId ?? '')).length, type: s.placingType!, groupId: s.activeGroupId ?? s.laneGroups[0]?.id ?? 'lg_implicit' }
+        ? { index: drag.index, type: drag.type, groupId: s.activeGroupId ?? 'lg_implicit' }
+        : placing && s.activeGroupId
+          ? {
+              index: stageUnits.length,
+              type: s.placingType!,
+              groupId: s.activeGroupId,
+            }
           : undefined
-    const layout = computeWorldLayout(s.units, s.gaps, s.laneGroups, ghostHint)
-    const base = computeWorldLayout(s.units, s.gaps, s.laneGroups)
-    const targets = wingTargets(s.lanes)
-    const maxDepth = s.units.reduce((m, u) => Math.max(m, CATALOG[u.type].depthMm / 1000), 1)
+    const layout = computeWorldLayout(stageUnits, s.gaps, stageGroups, ghostHint)
+    const base = computeWorldLayout(stageUnits, s.gaps, stageGroups)
+    const targets = wingTargets(stageLanes)
+    const maxDepth = stageUnits.reduce((m, u) => Math.max(m, CATALOG[u.type].depthMm / 1000), 1)
 
     const fw = Math.max(layout.width + 30, 34)
     floor.position.x = layout.centerX
@@ -670,7 +1287,7 @@ export function createNativeStage(
     key.position.set(layout.centerX + 3, 5, layout.centerZ + 3)
     fill.position.set(layout.centerX - 3, 2, layout.centerZ - 3)
 
-    const live = new Set(s.units.map((u) => u.id))
+    const live = new Set(stageUnits.map((u) => u.id))
     for (const [id, pack] of packs) {
       if (live.has(id)) continue
       unitsRoot.remove(pack.root)
@@ -683,8 +1300,8 @@ export function createNativeStage(
       ;(ph.material as THREE.Material).dispose()
       placeholders.delete(id)
     }
-    for (const u of s.units) ensureUnit(u)
-    for (const u of s.units) {
+    for (const u of stageUnits) ensureUnit(u)
+    for (const u of stageUnits) {
       const ph = placeholders.get(u.id)
       if (ph) {
         ph.position.x = layout.x[u.id] ?? 0
@@ -692,8 +1309,10 @@ export function createNativeStage(
       }
     }
 
-    const selId = s.mode === 'build' && s.sel?.kind === 'unit' ? s.sel.id : null
-    for (const u of s.units) {
+    // Build mode only: blue floor ring marks the selected cabinet.
+    // Operate mode never shows it (unit tap / lane focus / active unit).
+    const selId = s.mode === 'operate' ? null : s.sel?.kind === 'unit' ? s.sel.id : null
+    for (const u of stageUnits) {
       const pack = packs.get(u.id)
       if (!pack) continue
       const x = layout.x[u.id] ?? 0
@@ -701,7 +1320,7 @@ export function createNativeStage(
       pack.root.position.x = THREE.MathUtils.damp(pack.root.position.x || x, x, 9, dt)
       pack.root.position.z = THREE.MathUtils.damp(pack.root.position.z || z, z, 9, dt)
       pack.root.rotation.y = layout.rotY[u.id] ?? (u.flipped ? Math.PI : 0)
-      paintUnit(u, pack, s.lanes, s.led, s.finish, s.glass, selId, s.multi)
+      paintUnit(u, pack, stageLanes, s.led, s.finish, s.glass, selId, s.multi)
 
       for (const w of pack.wings) {
         const target = targets[`${u.id}:${w.wing}`] ?? 0
@@ -745,8 +1364,7 @@ export function createNativeStage(
       } else {
         screenRay(drag.clientX - left, drag.clientY - top)
         if (ray.ray.intersectPlane(plane, hit)) {
-          const gid = s.activeGroupId ?? s.laneGroups[0]?.id
-          const members = gid ? s.units.filter((u) => u.groupId === gid) : s.units
+          const members = stageUnits
           const xs = members.map((u) => base.x[u.id])
           let idx = members.length
           for (let i = 0; i < xs.length; i++) {
@@ -760,9 +1378,39 @@ export function createNativeStage(
       }
     }
 
-    rebuildExtras(layout, s.lanes, s.showDims || placing, showGhost, maxDepth, s.mode, placing)
+    rebuildExtras(
+      layout,
+      stageLanes,
+      stageUnits,
+      s.gaps,
+      s.showDims || placing,
+      showGhost,
+      maxDepth,
+      s.mode,
+      placing,
+      s.mode === 'operate' ? s.operateLaneId : null,
+      s.alarmKind != null,
+      s.finish,
+      s.led,
+      theme,
+    )
 
-    const dep = s.units.map((u) => `${u.id}${u.flipped ? 'f' : ''}${u.groupId}`).join('|') + s.laneGroups.map((g) => g.id).join(',')
+    // Keep operate trigger labels camera-facing so ALLOW/EXIT never reads mirrored.
+    if (s.mode === 'operate') {
+      extras.updateWorldMatrix(true, true)
+      extras.traverse((o) => {
+        if (!o.userData.operateBillboard || !o.parent) return
+        o.parent.getWorldQuaternion(parentWorldQuat)
+        billboardLocalQuat.copy(parentWorldQuat).invert().multiply(camera.quaternion)
+        o.quaternion.copy(billboardLocalQuat)
+      })
+    }
+
+    const dep =
+      (s.activeGroupId ?? '') +
+      '|' +
+      stageUnits.map((u) => `${u.id}${u.flipped ? 'f' : ''}${u.groupId}`).join('|') +
+      stageGroups.map((g) => g.id).join(',')
     if (dimSig !== dep) {
       dimSig = dep
       const pendingCam = Boolean(s.camCmd && s.camCmd.n !== lastCamN)
@@ -800,8 +1448,8 @@ export function createNativeStage(
       sync(dt)
       renderer.render(scene, camera)
       gl.endFrameEXP()
-    } catch (err) {
-      console.warn('stage frame failed', err)
+    } catch {
+      // Skip a bad frame; keep the render loop alive.
     }
     raf = requestAnimationFrame(loop)
   }

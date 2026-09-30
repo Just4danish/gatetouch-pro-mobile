@@ -10,6 +10,11 @@ export type InstallationRow = {
   doc: unknown
 }
 
+export type WifiConfig = {
+  wifi_ssid: string
+  wifi_password: string
+}
+
 const LIB_KEY_V1 = 'gatetouch_library_v1'
 const LIB_KEY_V2 = 'gatetouch_library_v2'
 
@@ -28,6 +33,11 @@ async function openDb() {
           thumb TEXT,
           schema_version INTEGER NOT NULL,
           doc TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS wifi_config (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          wifi_ssid TEXT NOT NULL,
+          wifi_password TEXT NOT NULL
         );
       `)
       return db
@@ -115,4 +125,27 @@ export async function replaceInstallations(lib: InstallationRow[]): Promise<void
       )
     }
   })
+}
+
+/** Persist Wi‑Fi credentials (single row). Plaintext for now. */
+export async function saveWifiConfig(wifi_ssid: string, wifi_password: string): Promise<void> {
+  const db = await openDb()
+  await db.runAsync(
+    `INSERT INTO wifi_config (id, wifi_ssid, wifi_password)
+     VALUES (1, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       wifi_ssid = excluded.wifi_ssid,
+       wifi_password = excluded.wifi_password`,
+    wifi_ssid,
+    wifi_password,
+  )
+}
+
+export async function loadWifiConfig(): Promise<WifiConfig | null> {
+  const db = await openDb()
+  const row = await db.getFirstAsync<{ wifi_ssid: string; wifi_password: string }>(
+    'SELECT wifi_ssid, wifi_password FROM wifi_config WHERE id = 1',
+  )
+  if (!row) return null
+  return { wifi_ssid: row.wifi_ssid, wifi_password: row.wifi_password }
 }

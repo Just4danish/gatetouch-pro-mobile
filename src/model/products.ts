@@ -182,3 +182,9 @@ export function categoryLabel(cat: TurnstileCategory): string {
 export function formatDimsMm(m: TurnstileModel): string {
   return `${m.widthMm} × ${m.lengthMm} × ${m.heightMm} mm`
 }
+
+/** Clear passage width range the model supports, in mm. */
+export function formatLaneRangeMm(m: TurnstileModel): string {
+  const { minMm, maxMm } = m.capabilities.supportedLaneWidthRange
+  return `${Math.round(minMm)}–${Math.round(maxMm)} mm`
+}

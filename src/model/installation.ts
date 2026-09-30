@@ -20,6 +20,9 @@ export interface LaneGroup {
   rotationY: number
   defaultClearMm: number
   direction: LaneDirection
+  /** Backend safety pin (1–28). Unset / 0 = alarm button hidden in Operate. */
+  emergencyPin?: number | null
+  firePin?: number | null
 }
 
 export interface LaneGroupRecipe {
@@ -121,6 +124,8 @@ export function migrateDoc(raw: unknown): MigratedDoc {
           rotationY: g.rotationY ?? 0,
           defaultClearMm: g.defaultClearMm ?? DEFAULT_CLEAR_MM,
           direction: g.direction ?? 'both',
+          emergencyPin: g.emergencyPin ?? null,
+          firePin: g.firePin ?? null,
         }))
       : unitsIn.length || src.name
         ? [makeLaneGroup(defaultGroupId(), 'Lane Group A', 0)]
