@@ -62,3 +62,8 @@ export function canManageResources(role: UserRole | null | undefined): boolean {
 export function canViewSystemConfig(role: UserRole | null | undefined): boolean {
   return hasPermission(role, 'VIEW_SYSTEM_CONFIG')
 }
+
+/** Admin-only: update system config, including hotspot / Wi‑Fi credentials. */
+export function canUpdateSystemConfig(role: UserRole | null | undefined): boolean {
+  return hasPermission(role, 'UPDATE_SYSTEM_CONFIG')
+}

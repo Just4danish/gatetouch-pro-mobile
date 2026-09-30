@@ -123,11 +123,6 @@ export function UsersListDialog({ open, onClose }: UsersListDialogProps) {
       buzz()
       return
     }
-    if (next.length < 4) {
-      setEditError('Password must be at least 4 characters.')
-      buzz()
-      return
-    }
     if (next !== confirmPassword.trim()) {
       setEditError('Passwords do not match.')
       buzz()

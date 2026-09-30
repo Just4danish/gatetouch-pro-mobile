@@ -14,12 +14,14 @@ export type SystemConfigDto = {
   wifi_ssid?: string | null
   wifi_password?: string | null
   trigger_delay?: number | null
+  site_name?: string | null
 }
 
 export type UpdateSystemConfigBody = Partial<{
   operator1_password: string
   operator2_password: string
   admin_password: string
+  site_name: string
 }>
 
 const PATH = '/api/system-config/'

@@ -80,7 +80,7 @@ export function StageCanvas({ onMiss }: { onMiss: () => void }) {
       st.setOperateUnitId(hit.id)
     } else if (hit?.kind === 'laneTrigger' && st.mode === 'operate') {
       const [laneId, dir] = hit.id.split(':')
-      if (laneId && (dir === 'entry' || dir === 'exit')) {
+      if (laneId && (dir === 'entry' || dir === 'exit' || dir === 'close')) {
         void triggerOperateLane(laneId, dir)
       }
     } else if (hit?.kind === 'lane' && st.mode === 'operate') {
@@ -89,10 +89,16 @@ export function StageCanvas({ onMiss }: { onMiss: () => void }) {
     else onMissRef.current()
   }
 
-  const triggerOperateLane = (laneId: string, dir: 'entry' | 'exit') => {
+  const triggerOperateLane = (laneId: string, dir: 'entry' | 'exit' | 'close') => {
     const st = useCorridor.getState()
     const lane = st.lanes.find((l) => l.id === laneId)
-    // Already open / in hold delay — ignore until the lane closes.
+    if (dir === 'close') {
+      if (!lane?.open) return
+      whoosh()
+      st.setLaneOpen(laneId, false)
+      return
+    }
+    // Already open / in hold delay — ignore until the lane closes (unless keep_open Close).
     if (lane?.open) {
       buzz()
       return

@@ -26,6 +26,7 @@ import { CameraBar, ContextMenu, DragGhost, DualUnitBar, LibrarySheet } from '..
 import { ChromeDrawer } from '../ui/ChromeDrawer'
 import { Glass } from '../ui/Glass'
 import { SceneSlot } from '../ui/SceneSlot'
+import { SiteNameBadge } from '../ui/SiteNameBadge'
 import { IconChevron } from '../ui/Icons'
 import { colors } from '../theme/tokens'
 import { tap } from '../lib/feedback'
@@ -251,6 +252,7 @@ export function CorridorScreen() {
 
           <CameraBar />
           <DualUnitBar />
+          <SiteNameBadge landscape={landscape} />
         </View>
 
         {panelCollapsed ? (

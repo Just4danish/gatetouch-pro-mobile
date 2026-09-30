@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
+import { Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native'
 import {
   categoryLabel,
   enabledManufacturers,
@@ -614,7 +614,13 @@ function AdjustLanesPage({
   onGroupPinsSaved: (emergencyPin: number | null, firePin: number | null) => void
   onLaneSaved: (
     serverId: string,
-    patch: { width?: number; delay?: number; entry_pin?: number | null; exit_pin?: number | null },
+    patch: {
+      width?: number
+      delay?: number
+      entry_pin?: number | null
+      exit_pin?: number | null
+      keep_open?: boolean
+    },
   ) => void
 }) {
   const theme = useTheme((s) => s.theme)
@@ -627,6 +633,7 @@ function AdjustLanesPage({
   const setLaneWidth = useCorridor((s) => s.setLaneWidth)
   const setLaneHold = useCorridor((s) => s.setLaneHold)
   const setLanePinsByServerId = useCorridor((s) => s.setLanePinsByServerId)
+  const setLaneKeepOpenByServerId = useCorridor((s) => s.setLaneKeepOpenByServerId)
   const mergeAdjacentLanes = useCorridor((s) => s.mergeAdjacentLanes)
   const splitLane = useCorridor((s) => s.splitLane)
   const showToast = useToast((s) => s.show)
@@ -651,6 +658,8 @@ function AdjustLanesPage({
   const [savedEntryPins, setSavedEntryPins] = useState<Record<string, number | null>>({})
   const [exitPinDrafts, setExitPinDrafts] = useState<Record<string, number | null>>({})
   const [savedExitPins, setSavedExitPins] = useState<Record<string, number | null>>({})
+  const [keepOpenDrafts, setKeepOpenDrafts] = useState<Record<string, boolean>>({})
+  const [savedKeepOpen, setSavedKeepOpen] = useState<Record<string, boolean>>({})
   const [openLanePinMenu, setOpenLanePinMenu] = useState<string | null>(null)
   const [savingLaneId, setSavingLaneId] = useState<string | null>(null)
 
@@ -684,6 +693,8 @@ function AdjustLanesPage({
     const savedEntry: Record<string, number | null> = {}
     const exitPins: Record<string, number | null> = {}
     const savedExit: Record<string, number | null> = {}
+    const keepOpen: Record<string, boolean> = {}
+    const savedKeep: Record<string, boolean> = {}
     for (const row of serverLanes) {
       const id = String(row.id)
       // Show backend width / delay exactly as returned (delay is milliseconds).
@@ -707,6 +718,9 @@ function AdjustLanesPage({
       savedEntry[id] = entry
       exitPins[id] = exit
       savedExit[id] = exit
+      const ko = row.keep_open === true
+      keepOpen[id] = ko
+      savedKeep[id] = ko
     }
     setWidthDrafts(widths)
     setSavedWidths(savedW)
@@ -716,6 +730,8 @@ function AdjustLanesPage({
     setSavedEntryPins(savedEntry)
     setExitPinDrafts(exitPins)
     setSavedExitPins(savedExit)
+    setKeepOpenDrafts(keepOpen)
+    setSavedKeepOpen(savedKeep)
   }, [serverLanes])
 
   const saveLaneFields = async (serverId: string, localLaneId: string) => {
@@ -738,11 +754,13 @@ function AdjustLanesPage({
     const delayMs = Math.round(delayN)
     const entryPin = entryPinDrafts[serverId] ?? null
     const exitPin = exitPinDrafts[serverId] ?? null
+    const keepOpen = keepOpenDrafts[serverId] === true
     const widthDirty = width !== savedWidths[serverId]
     const delayDirty = delayMs !== savedDelays[serverId]
     const entryDirty = entryPin !== savedEntryPins[serverId]
     const exitDirty = exitPin !== savedExitPins[serverId]
-    if (!widthDirty && !delayDirty && !entryDirty && !exitDirty) return
+    const keepOpenDirty = keepOpen !== savedKeepOpen[serverId]
+    if (!widthDirty && !delayDirty && !entryDirty && !exitDirty && !keepOpenDirty) return
 
     if ((entryDirty || exitDirty) && entryPin == null && exitPin == null) {
       buzz()
@@ -758,12 +776,14 @@ function AdjustLanesPage({
         delay?: number
         entry_pin?: number | null
         exit_pin?: number | null
+        keep_open?: boolean
       } = {}
       if (widthDirty) body.width = width
       // Send delay to the API as milliseconds, same unit as GET.
       if (delayDirty) body.delay = delayMs
       if (entryDirty) body.entry_pin = entryPin
       if (exitDirty) body.exit_pin = exitPin
+      if (keepOpenDirty) body.keep_open = keepOpen
       await updateLane(serverId, body)
       if (widthDirty) {
         setSavedWidths((prev) => ({ ...prev, [serverId]: width }))
@@ -787,6 +807,11 @@ function AdjustLanesPage({
       }
       if (entryDirty || exitDirty) {
         setLanePinsByServerId(serverId, entryPin, exitPin)
+      }
+      if (keepOpenDirty) {
+        setSavedKeepOpen((prev) => ({ ...prev, [serverId]: keepOpen }))
+        setKeepOpenDrafts((prev) => ({ ...prev, [serverId]: keepOpen }))
+        setLaneKeepOpenByServerId(serverId, keepOpen)
       }
       onLaneSaved(serverId, body)
       chime()
@@ -940,12 +965,14 @@ function AdjustLanesPage({
           const delayDraft = serverIdStr ? (delayDrafts[serverIdStr] ?? '') : ''
           const entryDraft = serverIdStr ? (entryPinDrafts[serverIdStr] ?? null) : null
           const exitDraft = serverIdStr ? (exitPinDrafts[serverIdStr] ?? null) : null
+          const keepOpenDraft = serverIdStr ? keepOpenDrafts[serverIdStr] === true : false
           const dirty =
             !!serverIdStr &&
             (Number(widthDraft) !== savedWidths[serverIdStr] ||
               Number(delayDraft) !== savedDelays[serverIdStr] ||
               entryDraft !== savedEntryPins[serverIdStr] ||
-              exitDraft !== savedExitPins[serverIdStr])
+              exitDraft !== savedExitPins[serverIdStr] ||
+              keepOpenDraft !== savedKeepOpen[serverIdStr])
           const saving = savingLaneId === serverIdStr
 
           return (
@@ -1114,6 +1141,35 @@ function AdjustLanesPage({
                     <Text style={[styles.fieldHint, { color: c.text3 }]}>milliseconds</Text>
                   </View>
                 </View>
+
+                {serverIdStr && (
+                  <View
+                    style={[
+                      styles.keepOpenRow,
+                      { backgroundColor: c.fill2, borderColor: c.hair },
+                    ]}
+                  >
+                    <View style={{ flex: 1, minWidth: 0 }}>
+                      <Text style={[styles.fieldBlockLabel, { color: c.text2, textAlign: 'left' }]}>
+                        Keep open
+                      </Text>
+                      <Text style={{ color: c.text3, fontSize: 11, marginTop: 2 }}>
+                        Stays open until Close is pressed
+                      </Text>
+                    </View>
+                    <Switch
+                      value={keepOpenDraft}
+                      disabled={!canUpdate}
+                      onValueChange={(v) => {
+                        tap()
+                        setKeepOpenDrafts((prev) => ({ ...prev, [serverIdStr]: v }))
+                      }}
+                      trackColor={{ false: c.hair, true: c.accent }}
+                      thumbColor={c.glass2}
+                      testID={`build.lane.keepOpen.${serverIdStr}`}
+                    />
+                  </View>
+                )}
 
                 {serverIdStr && (
                   <View style={styles.lanePinRow}>
@@ -1566,6 +1622,15 @@ const styles = StyleSheet.create({
     alignItems: 'flex-start',
     gap: 6,
     marginTop: 0,
+  },
+  keepOpenRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    borderRadius: 8,
+    borderWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
   },
   fieldBlock: {
     flex: 1.35,

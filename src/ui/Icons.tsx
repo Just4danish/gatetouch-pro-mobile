@@ -244,3 +244,23 @@ export function IconEdit({ color, size = 18 }: IconProps) {
     </Svg>
   )
 }
+
+export function IconWifi({ color, size = 20 }: IconProps) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <Path
+        d="M5 12.5a9.5 9.5 0 0 1 14 0"
+        stroke={color}
+        strokeWidth={1.8}
+        strokeLinecap="round"
+      />
+      <Path
+        d="M8.2 15.4a5.2 5.2 0 0 1 7.6 0"
+        stroke={color}
+        strokeWidth={1.8}
+        strokeLinecap="round"
+      />
+      <Circle cx="12" cy="18.4" r="1.1" fill={color} />
+    </Svg>
+  )
+}

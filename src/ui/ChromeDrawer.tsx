@@ -5,6 +5,7 @@ import {
   Modal,
   PanResponder,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -16,7 +17,12 @@ import { runOnJS } from 'react-native-reanimated'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useCorridor, lanesOfUnit } from '../store/corridor'
 import { useAuth } from '../store/auth'
-import { canManageResources, canViewSystemConfig, hasPermission } from '../auth/permissions'
+import {
+  canManageResources,
+  canUpdateSystemConfig,
+  canViewSystemConfig,
+  hasPermission,
+} from '../auth/permissions'
 import { useTheme } from '../store/theme'
 import { useHud } from '../store/hud'
 import { useToast } from '../store/toast'
@@ -39,9 +45,27 @@ import {
   triggerLaneGroupFire,
 } from '../api/laneGroup'
 import { Glass } from './Glass'
-import { IconEmergency, IconFire, IconGear, IconHelp, IconLogout, IconMoon, IconRedo, IconSun, IconUndo, IconUser, IconUsers } from './Icons'
+import {
+  IconEdit,
+  IconEmergency,
+  IconEye,
+  IconEyeOff,
+  IconFire,
+  IconGear,
+  IconHelp,
+  IconLogout,
+  IconMoon,
+  IconRedo,
+  IconSun,
+  IconUndo,
+  IconUser,
+  IconUsers,
+  IconWifi,
+} from './Icons'
 import { UsersListDialog } from './UsersListDialog'
 import { makeUiStyles } from './uiStyles'
+import { changeHotspot } from '../api/hotspot'
+import { getSystemConfig, updateSystemConfig } from '../api/systemConfig'
 
 const LOGO_DARK = require('../assets/logo/logo_dark.png')
 const LOGO_LIGHT = require('../assets/logo/logo.png')
@@ -208,6 +232,8 @@ export function ChromeDrawer({
   const role = useAuth((s) => s.role)
   const canManage = canManageResources(role)
   const canViewUsers = canViewSystemConfig(role)
+  const canEditHotspot = canUpdateSystemConfig(role)
+  const canEditSiteName = canUpdateSystemConfig(role)
   const canTriggerLane = hasPermission(role, 'TRIGGER_LANE')
   const canTriggerEmergency = hasPermission(role, 'TRIGGER_EMERGENCY')
   const canCloseEmergency = hasPermission(role, 'CLOSE_EMERGENCY')
@@ -225,11 +251,31 @@ export function ChromeDrawer({
   const laneGroups = useCorridor((s) => s.laneGroups)
   const alarmKind = useCorridor((s) => s.alarmKind)
   const activateOperateUnit = useCorridor((s) => s.activateOperateUnit)
+  const setLaneOpen = useCorridor((s) => s.setLaneOpen)
   const showToast = useToast((s) => s.show)
   const c = colors(theme)
   const u = makeUiStyles(c)
   const [usersOpen, setUsersOpen] = useState(false)
   const [accountMenuOpen, setAccountMenuOpen] = useState(false)
+  const [adminPwOpen, setAdminPwOpen] = useState(false)
+  const [adminPwNew, setAdminPwNew] = useState('')
+  const [adminPwConfirm, setAdminPwConfirm] = useState('')
+  const [adminPwError, setAdminPwError] = useState<string | null>(null)
+  const [adminPwSaving, setAdminPwSaving] = useState(false)
+  const [adminConfigId, setAdminConfigId] = useState<number | null>(null)
+  const [siteNameEditing, setSiteNameEditing] = useState(false)
+  const [siteNameDraft, setSiteNameDraft] = useState('')
+  const [siteNameSaving, setSiteNameSaving] = useState(false)
+  const [hotspotOpen, setHotspotOpen] = useState(false)
+  const [hotspotSsid, setHotspotSsid] = useState('')
+  const [hotspotPassword, setHotspotPassword] = useState('')
+  const [hotspotConfirm, setHotspotConfirm] = useState('')
+  const [hotspotShowPassword, setHotspotShowPassword] = useState(false)
+  const [hotspotShowConfirm, setHotspotShowConfirm] = useState(false)
+  const [hotspotError, setHotspotError] = useState<string | null>(null)
+  const [hotspotSaving, setHotspotSaving] = useState(false)
+  const [hotspotLoading, setHotspotLoading] = useState(false)
+  const hotspotLoadGen = useRef(0)
   const showAllowChrome = mode === 'operate' && !!operateUnitId
   const activeGroup = laneGroups.find((g) => g.id === activeGroupId)
   const pinReady = (n: number | null | undefined) => typeof n === 'number' && n >= 1
@@ -258,16 +304,23 @@ export function ChromeDrawer({
     return lanesOfUnit(lanes, operateUnitId)[0] ?? null
   })()
   // Lane is mid open/hold delay — block Allow entry/exit until it closes.
-  const laneTriggerBusy = !!focusedOperateLane?.open
+  // keep_open lanes stay open until Close; show Close instead of Allow while open.
+  const keepOpenHeld = !!focusedOperateLane?.keepOpen && !!focusedOperateLane?.open
+  const laneTriggerBusy = !!focusedOperateLane?.open && !keepOpenHeld
   const entryPin = normalizePin(focusedOperateLane?.entryPin)
   const exitPin = normalizePin(focusedOperateLane?.exitPin)
   // No pin metadata → keep legacy single Allow entry. Distinct pins → both buttons.
   const showAllowEntry =
     showAllowChrome &&
     canTriggerLane &&
+    !keepOpenHeld &&
     (entryPin != null || (entryPin == null && exitPin == null))
   const showAllowExit =
-    showAllowChrome && canTriggerLane && hasDistinctExitPin(entryPin, exitPin)
+    showAllowChrome &&
+    canTriggerLane &&
+    !keepOpenHeld &&
+    hasDistinctExitPin(entryPin, exitPin)
+  const showCloseLane = showAllowChrome && keepOpenHeld
 
   useEffect(() => {
     if (!canManage && mode === 'build') {
@@ -275,7 +328,75 @@ export function ChromeDrawer({
       setMode('operate')
     }
   }, [canManage, mode, setMode, setPanelCollapsed])
-  const allowCount = (showAllowEntry ? 1 : 0) + (showAllowExit ? 1 : 0)
+
+  // Gear heading: prefer backend site_name over the local "New installation" default.
+  useEffect(() => {
+    let alive = true
+    void getSystemConfig()
+      .then((config) => {
+        if (!alive) return
+        setAdminConfigId(config.id)
+        const site = config.site_name != null ? String(config.site_name).trim() : ''
+        if (site) setName(site)
+      })
+      .catch(() => {
+        // Operators / offline: keep the local installation name.
+      })
+    return () => {
+      alive = false
+    }
+  }, [role, setName])
+
+  const beginSiteNameEdit = () => {
+    tap()
+    if (!canEditSiteName || siteNameSaving) return
+    setSiteNameDraft(name?.trim() && name !== 'New installation' ? name.trim() : '')
+    setSiteNameEditing(true)
+  }
+
+  const cancelSiteNameEdit = () => {
+    setSiteNameEditing(false)
+    setSiteNameDraft('')
+  }
+
+  const saveSiteName = () => {
+    if (siteNameSaving) return
+    const next = siteNameDraft.trim()
+    if (!next) {
+      buzz()
+      showToast('Enter a site name.', 'error')
+      return
+    }
+    if (adminConfigId == null) {
+      buzz()
+      showToast('System configuration is not ready yet.', 'error')
+      return
+    }
+
+    setSiteNameSaving(true)
+    void updateSystemConfig(adminConfigId, { site_name: next })
+      .then((updated) => {
+        whoosh()
+        const saved =
+          updated?.site_name != null && String(updated.site_name).trim()
+            ? String(updated.site_name).trim()
+            : next
+        setName(saved)
+        setSiteNameEditing(false)
+        setSiteNameDraft('')
+        showToast('Site name updated', 'success')
+      })
+      .catch((err) => {
+        buzz()
+        showToast(apiErrorMessage(err), 'error')
+      })
+      .finally(() => {
+        setSiteNameSaving(false)
+      })
+  }
+
+  const allowCount =
+    (showAllowEntry ? 1 : 0) + (showAllowExit ? 1 : 0) + (showCloseLane ? 1 : 0)
   const allowClusterW =
     allowCount > 0 ? allowCount * ALLOW_W + (allowCount - 1) * ALLOW_GAP : 0
 
@@ -317,7 +438,7 @@ export function ChromeDrawer({
       }
 
   const sheetStyle = (() => {
-    const chromeBeside = showAllowEntry || showAllowExit || showAlarms
+    const chromeBeside = showAllowEntry || showAllowExit || showCloseLane || showAlarms
     if (useAnchored) {
       if (chromeBeside) {
         // Hang directly under the gear so side chrome doesn't cover the menu.
@@ -355,6 +476,11 @@ export function ChromeDrawer({
       width: sheetW,
     }
   })()
+
+  // Landscape: keep the gear card within the viewport and scroll expanded account/hotspot forms.
+  const sheetMaxHeight = landscape
+    ? Math.max(140, layoutH - (sheetStyle.top ?? STAGE_CHROME_TOP) - 12)
+    : undefined
 
   const alarmStyle = useAnchored
     ? {
@@ -432,6 +558,13 @@ export function ChromeDrawer({
       })
   }
 
+  const onCloseKeepOpenLane = () => {
+    if (!focusedOperateLane?.open || !focusedOperateLane.keepOpen) return
+    whoosh()
+    setLaneOpen(focusedOperateLane.id, false)
+    setOpen(false)
+  }
+
   const orientRef = useRef(landscape)
   const layoutReady = useRef(false)
   useEffect(() => {
@@ -473,14 +606,183 @@ export function ChromeDrawer({
 
   const close = () => {
     setAccountMenuOpen(false)
+    setAdminPwOpen(false)
+    setHotspotOpen(false)
+    setSiteNameEditing(false)
     setOpen(false)
   }
   const toggle = () => {
     tap()
     setOpen((v) => {
-      if (v) setAccountMenuOpen(false)
+      if (v) {
+        setAccountMenuOpen(false)
+        setAdminPwOpen(false)
+        setHotspotOpen(false)
+        setSiteNameEditing(false)
+      }
       return !v
     })
+  }
+
+  const resetHotspotForm = () => {
+    hotspotLoadGen.current += 1
+    setHotspotSsid('')
+    setHotspotPassword('')
+    setHotspotConfirm('')
+    setHotspotShowPassword(false)
+    setHotspotShowConfirm(false)
+    setHotspotError(null)
+    setHotspotLoading(false)
+  }
+
+  const toggleAdminPasswordEdit = () => {
+    tap()
+    if (adminPwSaving) return
+    setHotspotOpen(false)
+    setAdminPwOpen((open) => {
+      const next = !open
+      if (next) {
+        setAdminPwNew('')
+        setAdminPwConfirm('')
+        setAdminPwError(null)
+        if (adminConfigId == null) {
+          void getSystemConfig()
+            .then((config) => setAdminConfigId(config.id))
+            .catch((err) => {
+              buzz()
+              setAdminPwError(apiErrorMessage(err))
+            })
+        }
+      } else {
+        setAdminPwNew('')
+        setAdminPwConfirm('')
+        setAdminPwError(null)
+      }
+      return next
+    })
+  }
+
+  const saveAdminPassword = () => {
+    if (adminPwSaving) return
+    const next = adminPwNew.trim()
+    if (!next) {
+      setAdminPwError('Enter a new password.')
+      buzz()
+      return
+    }
+    if (next !== adminPwConfirm.trim()) {
+      setAdminPwError('Passwords do not match.')
+      buzz()
+      return
+    }
+    if (adminConfigId == null) {
+      setAdminPwError('System configuration is not ready yet.')
+      buzz()
+      return
+    }
+
+    setAdminPwSaving(true)
+    setAdminPwError(null)
+    void updateSystemConfig(adminConfigId, { admin_password: next })
+      .then(() => {
+        whoosh()
+        setAdminPwOpen(false)
+        setAdminPwNew('')
+        setAdminPwConfirm('')
+        setAdminPwError(null)
+        showToast('Admin password updated', 'success')
+      })
+      .catch((err) => {
+        buzz()
+        const message = apiErrorMessage(err)
+        showToast(message, 'error')
+        setAdminPwError(message)
+      })
+      .finally(() => {
+        setAdminPwSaving(false)
+      })
+  }
+
+  const toggleHotspotEdit = () => {
+    tap()
+    if (hotspotSaving || hotspotLoading) return
+    setAdminPwOpen(false)
+
+    if (hotspotOpen) {
+      setHotspotOpen(false)
+      resetHotspotForm()
+      return
+    }
+
+    const loadId = hotspotLoadGen.current + 1
+    hotspotLoadGen.current = loadId
+    setHotspotOpen(true)
+    setHotspotShowPassword(false)
+    setHotspotShowConfirm(false)
+    setHotspotError(null)
+    setHotspotLoading(true)
+    setHotspotSsid('')
+    setHotspotPassword('')
+    setHotspotConfirm('')
+
+    void getSystemConfig()
+      .then((config) => {
+        if (hotspotLoadGen.current !== loadId) return
+        const ssid = config.wifi_ssid != null ? String(config.wifi_ssid).trim() : ''
+        const password = config.wifi_password != null ? String(config.wifi_password) : ''
+        setHotspotSsid(ssid)
+        setHotspotPassword(password)
+        setHotspotConfirm(password)
+      })
+      .catch((err) => {
+        if (hotspotLoadGen.current !== loadId) return
+        buzz()
+        setHotspotError(apiErrorMessage(err))
+      })
+      .finally(() => {
+        if (hotspotLoadGen.current === loadId) setHotspotLoading(false)
+      })
+  }
+
+  const saveHotspot = () => {
+    if (hotspotSaving) return
+    const ssid = hotspotSsid.trim()
+    const password = hotspotPassword
+    if (!ssid) {
+      setHotspotError('Enter an SSID.')
+      buzz()
+      return
+    }
+    if (!password) {
+      setHotspotError('Enter a password.')
+      buzz()
+      return
+    }
+    if (password !== hotspotConfirm) {
+      setHotspotError('Passwords do not match.')
+      buzz()
+      return
+    }
+
+    setHotspotSaving(true)
+    setHotspotError(null)
+    // visibility is always forced to "hidden" inside changeHotspot — never shown or editable here.
+    void changeHotspot({ ssid, password })
+      .then(() => {
+        whoosh()
+        setHotspotOpen(false)
+        resetHotspotForm()
+        showToast('Hotspot credentials updated', 'success')
+      })
+      .catch((err) => {
+        buzz()
+        const message = apiErrorMessage(err)
+        showToast(message, 'error')
+        setHotspotError(message)
+      })
+      .finally(() => {
+        setHotspotSaving(false)
+      })
   }
 
   const pan = useMemo(
@@ -545,8 +847,27 @@ export function ChromeDrawer({
       )}
 
       {open && (
-        <View style={[styles.sheetWrap, sheetStyle]} pointerEvents="box-none">
-          <Glass overlay={c.glass} style={[styles.sheet, { borderColor: c.hair }]}>
+        <View
+          style={[styles.sheetWrap, sheetStyle, sheetMaxHeight != null && { maxHeight: sheetMaxHeight }]}
+          pointerEvents="box-none"
+        >
+          <Glass
+            overlay={c.glass}
+            style={[
+              styles.sheet,
+              { borderColor: c.hair },
+              sheetMaxHeight != null && { maxHeight: sheetMaxHeight },
+            ]}
+          >
+            <ScrollView
+              scrollEnabled={landscape}
+              nestedScrollEnabled
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+              bounces={landscape}
+              style={sheetMaxHeight != null ? { maxHeight: sheetMaxHeight - 16 } : undefined}
+              contentContainerStyle={styles.sheetScrollContent}
+            >
             {/* Installation + theme / help / account */}
             <View style={styles.row}>
               <View style={[styles.titlePill, { backgroundColor: c.glass2, borderColor: c.hair }]}>
@@ -559,19 +880,93 @@ export function ChromeDrawer({
                   />
                 </View>
                 <View style={styles.titleCopy}>
-                  <TextInput
-                    value={name}
-                    onChangeText={setName}
-                    style={[styles.nameInput, { color: c.text }]}
-                    placeholder="Installation"
-                    placeholderTextColor={c.text3}
-                    testID="app.installation.name"
-                    accessibilityLabel="Installation name"
-                  />
+                  {siteNameEditing ? (
+                    <TextInput
+                      value={siteNameDraft}
+                      onChangeText={setSiteNameDraft}
+                      style={[styles.nameInput, { color: c.text }]}
+                      placeholder="Site name"
+                      placeholderTextColor={c.text3}
+                      autoCapitalize="words"
+                      autoCorrect={false}
+                      editable={!siteNameSaving}
+                      autoFocus
+                      returnKeyType="done"
+                      onSubmitEditing={saveSiteName}
+                      testID="app.site.name.input"
+                      accessibilityLabel="Site name"
+                    />
+                  ) : (
+                    <Text
+                      style={[styles.nameInput, { color: c.text }]}
+                      numberOfLines={1}
+                      testID="app.installation.name"
+                      accessibilityLabel="Site name"
+                    >
+                      {name?.trim() || 'Site'}
+                    </Text>
+                  )}
                   <Text style={[styles.unitMeta, { color: c.text3 }]} numberOfLines={1}>
                     {units.length} unit{units.length === 1 ? '' : 's'}
                   </Text>
                 </View>
+                {canEditSiteName ? (
+                  siteNameEditing ? (
+                    <Pressable
+                      style={[
+                        styles.adminEditBtn,
+                        {
+                          backgroundColor: c.accent,
+                          borderColor: c.accent,
+                          opacity: siteNameSaving ? 0.65 : 1,
+                        },
+                      ]}
+                      testID="app.site.name.save"
+                      accessibilityRole="button"
+                      accessibilityLabel="Save site name"
+                      disabled={siteNameSaving}
+                      hitSlop={8}
+                      onPress={() => {
+                        tap()
+                        saveSiteName()
+                      }}
+                    >
+                      <Text style={{ color: '#fff', fontSize: 11, fontWeight: '800' }}>
+                        {siteNameSaving ? '…' : '✓'}
+                      </Text>
+                    </Pressable>
+                  ) : (
+                    <Pressable
+                      style={[
+                        styles.adminEditBtn,
+                        { backgroundColor: c.chrome, borderColor: c.hair },
+                      ]}
+                      testID="app.site.name.edit"
+                      accessibilityRole="button"
+                      accessibilityLabel="Edit site name"
+                      hitSlop={8}
+                      onPress={beginSiteNameEdit}
+                    >
+                      <IconEdit color={c.accentFg} size={12} />
+                    </Pressable>
+                  )
+                ) : null}
+                {canEditSiteName && siteNameEditing ? (
+                  <Pressable
+                    style={[styles.adminEditBtn, { backgroundColor: c.chrome, borderColor: c.hair }]}
+                    testID="app.site.name.cancel"
+                    accessibilityRole="button"
+                    accessibilityLabel="Cancel site name edit"
+                    disabled={siteNameSaving}
+                    hitSlop={8}
+                    onPress={() => {
+                      tap()
+                      cancelSiteNameEdit()
+                    }}
+                  >
+                    <Text style={{ color: c.text2, fontSize: 12, fontWeight: '700' }}>×</Text>
+                  </Pressable>
+                ) : null}
               </View>
 
               {mode === 'build' && (canUndo || canRedo) && (
@@ -639,7 +1034,13 @@ export function ChromeDrawer({
                 accessibilityState={{ expanded: accountMenuOpen }}
                 onPress={() => {
                   tap()
-                  setAccountMenuOpen((v) => !v)
+                  setAccountMenuOpen((v) => {
+                    if (v) {
+                      setAdminPwOpen(false)
+                      setHotspotOpen(false)
+                    }
+                    return !v
+                  })
                 }}
               >
                 <IconUser color={accountMenuOpen ? c.accentFg : c.text} size={18} />
@@ -731,25 +1132,296 @@ export function ChromeDrawer({
 
             {accountMenuOpen ? (
               <View style={[styles.accountPanel, { backgroundColor: c.glass2, borderColor: c.hair }]}>
-                <View style={styles.accountHeader}>
-                  <View style={[styles.avatar, { backgroundColor: c.fill2, borderColor: c.hair }]}>
-                    <IconUser color={c.accentFg} size={18} />
-                  </View>
-                  <View style={styles.accountCopy}>
-                    <Text style={[styles.accountName, { color: c.text }]} numberOfLines={1}>
-                      {authUsername || 'Signed in'}
-                    </Text>
-                    <Text style={[styles.accountRole, { color: c.text3 }]} numberOfLines={1}>
-                      {role === 'Admin'
-                        ? 'Admin'
-                        : role === 'Operator1'
+                {canViewUsers ? (
+                  <>
+                    <Pressable
+                      style={styles.accountHeader}
+                      testID="app.account.admin"
+                      accessibilityRole="button"
+                      accessibilityLabel="Change admin password"
+                      accessibilityState={{ expanded: adminPwOpen }}
+                      onPress={toggleAdminPasswordEdit}
+                    >
+                      <View style={[styles.avatar, { backgroundColor: c.fill2, borderColor: c.hair }]}>
+                        <IconUser color={c.accentFg} size={15} />
+                      </View>
+                      <View style={styles.accountCopy}>
+                        <Text style={[styles.accountName, { color: c.text }]} numberOfLines={1}>
+                          Admin
+                        </Text>
+                      </View>
+                      <Pressable
+                        style={[
+                          styles.adminEditBtn,
+                          {
+                            backgroundColor: adminPwOpen ? c.accentTint : c.chrome,
+                            borderColor: adminPwOpen ? c.accent : c.hair,
+                          },
+                        ]}
+                        testID="app.account.admin.password.edit"
+                        accessibilityRole="button"
+                        accessibilityLabel="Edit admin password"
+                        onPress={toggleAdminPasswordEdit}
+                        hitSlop={8}
+                      >
+                        <IconEdit color={c.accentFg} size={12} />
+                      </Pressable>
+                    </Pressable>
+
+                    {adminPwOpen ? (
+                      <View style={[styles.adminPwExpand, { borderTopColor: c.hair }]}>
+                        <TextInput
+                          value={adminPwNew}
+                          onChangeText={setAdminPwNew}
+                          style={[
+                            styles.adminPwInput,
+                            {
+                              color: c.text,
+                              backgroundColor: theme === 'dark' ? 'rgba(0,0,0,0.45)' : 'rgba(255,255,255,0.92)',
+                              borderColor: c.hair,
+                            },
+                          ]}
+                          placeholder="New password"
+                          placeholderTextColor={c.text3}
+                          secureTextEntry
+                          autoCapitalize="none"
+                          autoCorrect={false}
+                          editable={!adminPwSaving}
+                          testID="app.account.admin.password.new"
+                        />
+                        <TextInput
+                          value={adminPwConfirm}
+                          onChangeText={setAdminPwConfirm}
+                          style={[
+                            styles.adminPwInput,
+                            {
+                              color: c.text,
+                              backgroundColor: theme === 'dark' ? 'rgba(0,0,0,0.45)' : 'rgba(255,255,255,0.92)',
+                              borderColor: c.hair,
+                            },
+                          ]}
+                          placeholder="Confirm password"
+                          placeholderTextColor={c.text3}
+                          secureTextEntry
+                          autoCapitalize="none"
+                          autoCorrect={false}
+                          editable={!adminPwSaving}
+                          testID="app.account.admin.password.confirm"
+                        />
+
+                        {adminPwError ? (
+                          <Text
+                            style={[styles.adminPwError, { color: c.redFg }]}
+                            testID="app.account.admin.password.error"
+                          >
+                            {adminPwError}
+                          </Text>
+                        ) : null}
+
+                        <Pressable
+                          style={[
+                            styles.adminPwSave,
+                            { backgroundColor: c.accent },
+                            adminPwSaving && { opacity: 0.65 },
+                          ]}
+                          testID="app.account.admin.password.save"
+                          disabled={adminPwSaving}
+                          onPress={() => {
+                            tap()
+                            saveAdminPassword()
+                          }}
+                        >
+                          <Text style={styles.adminPwSaveText}>
+                            {adminPwSaving ? 'Saving…' : 'Save'}
+                          </Text>
+                        </Pressable>
+                      </View>
+                    ) : null}
+
+                    {canEditHotspot ? (
+                      <>
+                        <View style={[styles.accountDivider, { backgroundColor: c.hair }]} />
+                        <Pressable
+                          style={styles.accountMenuItem}
+                          testID="app.account.hotspot"
+                          accessibilityRole="button"
+                          accessibilityLabel="Change hotspot credentials"
+                          accessibilityState={{ expanded: hotspotOpen }}
+                          onPress={toggleHotspotEdit}
+                        >
+                          <IconWifi color={c.text2} size={16} />
+                          <Text style={[styles.accountMenuText, { color: c.text }]}>Hotspot</Text>
+                          <View
+                            style={[
+                              styles.adminEditBtn,
+                              {
+                                marginLeft: 'auto',
+                                backgroundColor: hotspotOpen ? c.accentTint : c.chrome,
+                                borderColor: hotspotOpen ? c.accent : c.hair,
+                              },
+                            ]}
+                            testID="app.account.hotspot.edit"
+                          >
+                            <IconEdit color={c.accentFg} size={12} />
+                          </View>
+                        </Pressable>
+
+                        {hotspotOpen ? (
+                          <View style={[styles.adminPwExpand, { borderTopColor: c.hair }]}>
+                            <TextInput
+                              value={hotspotSsid}
+                              onChangeText={setHotspotSsid}
+                              style={[
+                                styles.adminPwInput,
+                                {
+                                  color: c.text,
+                                  backgroundColor:
+                                    theme === 'dark' ? 'rgba(0,0,0,0.45)' : 'rgba(255,255,255,0.92)',
+                                  borderColor: c.hair,
+                                },
+                              ]}
+                              placeholder={hotspotLoading ? 'Loading SSID…' : 'SSID'}
+                              placeholderTextColor={c.text3}
+                              autoCapitalize="none"
+                              autoCorrect={false}
+                              editable={!hotspotSaving && !hotspotLoading}
+                              testID="app.account.hotspot.ssid"
+                            />
+                            <View
+                              style={[
+                                styles.hotspotPwRow,
+                                {
+                                  backgroundColor:
+                                    theme === 'dark' ? 'rgba(0,0,0,0.45)' : 'rgba(255,255,255,0.92)',
+                                  borderColor: c.hair,
+                                },
+                              ]}
+                            >
+                              <TextInput
+                                value={hotspotPassword}
+                                onChangeText={setHotspotPassword}
+                                style={[styles.hotspotPwInput, { color: c.text }]}
+                                placeholder={hotspotLoading ? 'Loading password…' : 'Password'}
+                                placeholderTextColor={c.text3}
+                                secureTextEntry={!hotspotShowPassword}
+                                autoCapitalize="none"
+                                autoCorrect={false}
+                                editable={!hotspotSaving && !hotspotLoading}
+                                testID="app.account.hotspot.password"
+                              />
+                              <Pressable
+                                style={styles.hotspotEyeBtn}
+                                testID="app.account.hotspot.password.toggle"
+                                accessibilityRole="button"
+                                accessibilityLabel={
+                                  hotspotShowPassword ? 'Hide hotspot password' : 'Show hotspot password'
+                                }
+                                hitSlop={8}
+                                onPress={() => {
+                                  tap()
+                                  setHotspotShowPassword((v) => !v)
+                                }}
+                              >
+                                {hotspotShowPassword ? (
+                                  <IconEyeOff color={c.text2} size={16} />
+                                ) : (
+                                  <IconEye color={c.text2} size={16} />
+                                )}
+                              </Pressable>
+                            </View>
+                            <View
+                              style={[
+                                styles.hotspotPwRow,
+                                {
+                                  backgroundColor:
+                                    theme === 'dark' ? 'rgba(0,0,0,0.45)' : 'rgba(255,255,255,0.92)',
+                                  borderColor: c.hair,
+                                },
+                              ]}
+                            >
+                              <TextInput
+                                value={hotspotConfirm}
+                                onChangeText={setHotspotConfirm}
+                                style={[styles.hotspotPwInput, { color: c.text }]}
+                                placeholder="Confirm password"
+                                placeholderTextColor={c.text3}
+                                secureTextEntry={!hotspotShowConfirm}
+                                autoCapitalize="none"
+                                autoCorrect={false}
+                                editable={!hotspotSaving && !hotspotLoading}
+                                testID="app.account.hotspot.password.confirm"
+                              />
+                              <Pressable
+                                style={styles.hotspotEyeBtn}
+                                testID="app.account.hotspot.password.confirm.toggle"
+                                accessibilityRole="button"
+                                accessibilityLabel={
+                                  hotspotShowConfirm ? 'Hide confirm password' : 'Show confirm password'
+                                }
+                                hitSlop={8}
+                                onPress={() => {
+                                  tap()
+                                  setHotspotShowConfirm((v) => !v)
+                                }}
+                              >
+                                {hotspotShowConfirm ? (
+                                  <IconEyeOff color={c.text2} size={16} />
+                                ) : (
+                                  <IconEye color={c.text2} size={16} />
+                                )}
+                              </Pressable>
+                            </View>
+
+                            {hotspotError ? (
+                              <Text
+                                style={[styles.adminPwError, { color: c.redFg }]}
+                                testID="app.account.hotspot.error"
+                              >
+                                {hotspotError}
+                              </Text>
+                            ) : null}
+
+                            <Pressable
+                              style={[
+                                styles.adminPwSave,
+                                { backgroundColor: c.accent },
+                                (hotspotSaving || hotspotLoading) && { opacity: 0.65 },
+                              ]}
+                              testID="app.account.hotspot.save"
+                              disabled={hotspotSaving || hotspotLoading}
+                              onPress={() => {
+                                tap()
+                                saveHotspot()
+                              }}
+                            >
+                              <Text style={styles.adminPwSaveText}>
+                                {hotspotSaving ? 'Saving…' : hotspotLoading ? 'Loading…' : 'Save'}
+                              </Text>
+                            </Pressable>
+                          </View>
+                        ) : null}
+                      </>
+                    ) : null}
+                  </>
+                ) : (
+                  <View style={styles.accountHeader}>
+                    <View style={[styles.avatar, { backgroundColor: c.fill2, borderColor: c.hair }]}>
+                      <IconUser color={c.accentFg} size={18} />
+                    </View>
+                    <View style={styles.accountCopy}>
+                      <Text style={[styles.accountName, { color: c.text }]} numberOfLines={1}>
+                        {authUsername || 'Signed in'}
+                      </Text>
+                      <Text style={[styles.accountRole, { color: c.text3 }]} numberOfLines={1}>
+                        {role === 'Operator1'
                           ? 'Operator 1'
                           : role === 'Operator2'
                             ? 'Operator 2'
                             : 'User'}
-                    </Text>
+                      </Text>
+                    </View>
                   </View>
-                </View>
+                )}
 
                 <View style={[styles.accountDivider, { backgroundColor: c.hair }]} />
 
@@ -788,6 +1460,7 @@ export function ChromeDrawer({
                 </Pressable>
               </View>
             ) : null}
+            </ScrollView>
           </Glass>
         </View>
       )}
@@ -847,8 +1520,38 @@ export function ChromeDrawer({
         </View>
       )}
 
-      {(showAllowEntry || showAllowExit) && (
+      {(showAllowEntry || showAllowExit || showCloseLane) && (
         <View style={[styles.allowRow, allowStyle]}>
+          {showCloseLane && (
+            <Pressable
+              style={[
+                styles.allowEntry,
+                {
+                  backgroundColor: triggerFill,
+                  borderColor: c.red,
+                  borderWidth: 2,
+                },
+              ]}
+              testID="operate.closeLane"
+              accessibilityRole="button"
+              accessibilityLabel="Close lane"
+              onPress={() => {
+                tap()
+                onCloseKeepOpenLane()
+              }}
+            >
+              <Text
+                style={{
+                  color: c.redFg,
+                  fontSize: 13,
+                  fontWeight: '700',
+                }}
+                numberOfLines={1}
+              >
+                Close
+              </Text>
+            </Pressable>
+          )}
           {showAllowEntry && (
             <Pressable
               style={[
@@ -1090,7 +1793,10 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     borderWidth: StyleSheet.hairlineWidth,
     padding: 8,
+  },
+  sheetScrollContent: {
     gap: 6,
+    paddingBottom: 2,
   },
   row: {
     flexDirection: 'row',
@@ -1212,20 +1918,20 @@ const styles = StyleSheet.create({
   accountPanel: {
     borderRadius: 10,
     borderWidth: StyleSheet.hairlineWidth,
-    padding: 6,
-    gap: 2,
+    padding: 4,
+    gap: 1,
   },
   accountHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
+    gap: 8,
     paddingHorizontal: 6,
-    paddingVertical: 6,
+    paddingVertical: 4,
   },
   avatar: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
+    width: 30,
+    height: 30,
+    borderRadius: 15,
     borderWidth: StyleSheet.hairlineWidth,
     alignItems: 'center',
     justifyContent: 'center',
@@ -1236,29 +1942,96 @@ const styles = StyleSheet.create({
     gap: 1,
   },
   accountName: {
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '700',
   },
   accountRole: {
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: '600',
   },
   accountDivider: {
     height: StyleSheet.hairlineWidth,
-    marginVertical: 4,
+    marginVertical: 2,
     marginHorizontal: 4,
   },
   accountMenuItem: {
-    minHeight: 40,
-    borderRadius: 10,
+    minHeight: 34,
+    borderRadius: 8,
     paddingHorizontal: 10,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
+    gap: 8,
   },
   accountMenuText: {
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '600',
+  },
+  adminEditBtn: {
+    width: 26,
+    height: 26,
+    borderRadius: 7,
+    borderWidth: StyleSheet.hairlineWidth,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
+  adminPwExpand: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    marginHorizontal: 4,
+    paddingTop: 6,
+    paddingBottom: 4,
+    gap: 6,
+  },
+  adminPwInput: {
+    minHeight: 32,
+    borderRadius: 8,
+    borderWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: 10,
+    paddingVertical: 0,
+    fontSize: 12,
+    fontWeight: '600',
+    includeFontPadding: false,
+  },
+  hotspotPwRow: {
+    minHeight: 32,
+    borderRadius: 8,
+    borderWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingLeft: 10,
+    paddingRight: 4,
+  },
+  hotspotPwInput: {
+    flex: 1,
+    minWidth: 0,
+    minHeight: 32,
+    paddingVertical: 0,
+    paddingRight: 6,
+    fontSize: 12,
+    fontWeight: '600',
+    includeFontPadding: false,
+  },
+  hotspotEyeBtn: {
+    width: 28,
+    height: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
+  adminPwError: {
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  adminPwSave: {
+    minHeight: 30,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  adminPwSaveText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '700',
   },
   gear: {
     position: 'absolute',

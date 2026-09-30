@@ -84,6 +84,8 @@ export interface Lane {
   entryPin?: number | null
   /** Backend GPIO pin for exit trigger (1–28). */
   exitPin?: number | null
+  /** When true, stays open until manually closed (no holdSec auto-close). */
+  keepOpen?: boolean
 }
 
 export type Mode = 'build' | 'operate'
@@ -260,6 +262,7 @@ interface State extends Doc {
     entryPin: number | null,
     exitPin: number | null,
   ) => void
+  setLaneKeepOpenByServerId: (serverLaneId: string, keepOpen: boolean) => void
 
   /* runtime control */
   requestLane: (id: string) => void
@@ -412,6 +415,7 @@ function baseLane(members: WingRef[], i: number, groupId?: string): Lane {
     clearMm: DEFAULT_CLEAR_MM,
     entryPin: null,
     exitPin: null,
+    keepOpen: false,
   }
 }
 
@@ -441,7 +445,7 @@ function pruneLanes(lanes: Lane[], units: PlacedUnit[]): Lane[] {
     .filter((l) => l.members.length > 0)
 }
 
-/** Map backend entry/exit pins + delay onto local neighbour-passage lanes. */
+/** Map backend entry/exit pins + delay + keep_open onto local neighbour-passage lanes. */
 function applyServerLanePins(
   lanes: Lane[],
   serverLanes: Array<{
@@ -449,6 +453,7 @@ function applyServerLanePins(
     entry_pin?: number | null
     exit_pin?: number | null
     delay?: number | null
+    keep_open?: boolean | null
   }>,
 ): Lane[] {
   const metaByServerId = new Map(
@@ -461,6 +466,7 @@ function applyServerLanePins(
           const sec = delayMsToSec(l.delay)
           return sec != null && sec > 0 ? sec : null
         })(),
+        keepOpen: l.keep_open === true,
       },
     ]),
   )
@@ -474,6 +480,7 @@ function applyServerLanePins(
       entryPin: meta.entryPin,
       exitPin: meta.exitPin,
       holdSec: meta.holdSec ?? lane.holdSec,
+      keepOpen: meta.keepOpen,
     }
   })
 }
@@ -1151,6 +1158,10 @@ export const useCorridor = create<State>((set, get) => {
         const lanes = s.lanes.map((l) => {
           if (!related.has(l.id)) return l
           if (l.mode === 'locked' || l.mode === 'noentry') return l
+          // keep_open: stay open until the user presses Close (no auto-close timer).
+          if (l.keepOpen) {
+            return { ...l, open: true, openedAt: null }
+          }
           // Match lane-card open: badge mode gets a holdSec auto-close timer.
           if (l.mode === 'badge') {
             return {
@@ -1298,6 +1309,20 @@ export const useCorridor = create<State>((set, get) => {
         return changed ? { lanes } : s
       }),
 
+    setLaneKeepOpenByServerId: (serverLaneId, keepOpen) =>
+      set((s) => {
+        let changed = false
+        const lanes = s.lanes.map((l) => {
+          if (owningServerLaneId(l.members) !== String(serverLaneId)) return l
+          if (l.keepOpen === keepOpen) return l
+          changed = true
+          // Drop any running hold timer when switching to keep-open while already open.
+          if (keepOpen && l.open) return { ...l, keepOpen: true, openedAt: null }
+          return { ...l, keepOpen }
+        })
+        return changed ? { lanes } : s
+      }),
+
     /* runtime control (never undoable) */
     requestLane: (id) =>
       set((s) => ({
@@ -1305,6 +1330,7 @@ export const useCorridor = create<State>((set, get) => {
           if (l.id !== id) return l
           if (l.mode === 'locked' || l.mode === 'noentry') return l
           if (l.open) return { ...l, open: false, openedAt: null }
+          if (l.keepOpen) return { ...l, open: true, openedAt: null }
           return { ...l, open: true, openedAt: l.mode === 'badge' ? Date.now() : null }
         }),
       })),
@@ -1362,6 +1388,7 @@ export const useCorridor = create<State>((set, get) => {
       const now = Date.now()
       const s = get()
       const expired = (l: Lane) => {
+        if (l.keepOpen) return false
         if (l.openedAt == null) return false
         const holdSec = Number.isFinite(l.holdSec) && l.holdSec > 0 ? l.holdSec : 5
         return now - l.openedAt > holdSec * 1000

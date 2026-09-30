@@ -34,6 +34,8 @@ export type LaneDto = {
   exit_pin?: number | null
   /** Auto-close / hold delay from the API, in milliseconds. */
   delay?: number | null
+  /** When true, lane stays open until manually closed (no auto-close timer). */
+  keep_open?: boolean | null
   created_by?: string
 }
 
@@ -43,6 +45,7 @@ export type UpdateLaneBody = {
   width?: number
   entry_pin?: number | null
   exit_pin?: number | null
+  keep_open?: boolean
 }
 
 /** Convert API delay (ms) → seconds for hold timers only. */
@@ -61,6 +64,10 @@ export function laneDelayFromApi(delay: unknown): number | null {
 export function laneWidthFromApi(width: unknown): number | null {
   if (typeof width !== 'number' || !Number.isFinite(width) || width <= 0) return null
   return width
+}
+
+export function laneKeepOpenFromApi(value: unknown): boolean {
+  return value === true
 }
 
 const PATH = '/api/lanes/'

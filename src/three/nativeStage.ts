@@ -405,18 +405,26 @@ const TRIGGER_GREEN = '39ff14'
 /** Same blue as the turnstile top LED ring (`LED_DEFAULT`). */
 const TRIGGER_BLUE = '0a84ff'
 
-function triggerButtonColors(dir: 'entry' | 'exit'): { bg: string; border: string; fg: string } {
+function triggerButtonColors(dir: 'entry' | 'exit' | 'close'): { bg: string; border: string; fg: string } {
+  if (dir === 'close') {
+    return { bg: TRIGGER_FILL, border: '#ff453a', fg: '#ff453a' }
+  }
   if (dir === 'exit') {
     return { bg: TRIGGER_FILL, border: TRIGGER_BLUE, fg: TRIGGER_BLUE }
   }
   return { bg: TRIGGER_FILL, border: TRIGGER_BLUE, fg: TRIGGER_GREEN }
 }
 
-function laneOperateButtons(lane: Lane): Array<{ dir: 'entry' | 'exit'; label: string }> {
+function laneOperateButtons(
+  lane: Lane,
+): Array<{ dir: 'entry' | 'exit' | 'close'; label: string }> {
+  if (lane.open && lane.keepOpen) {
+    return [{ dir: 'close', label: 'CLOSE' }]
+  }
   const entry = normalizePin(lane.entryPin)
   const exit = normalizePin(lane.exitPin)
   const both = entry != null && exit != null && entry !== exit
-  const buttons: Array<{ dir: 'entry' | 'exit'; label: string }> = []
+  const buttons: Array<{ dir: 'entry' | 'exit' | 'close'; label: string }> = []
   if (both) {
     buttons.push({ dir: 'entry', label: 'ENTRY' })
     buttons.push({ dir: 'exit', label: 'EXIT' })
@@ -813,8 +821,9 @@ function makeLaneVolume(
 
   // Forward-facing operate buttons above the lane passage (billboarded to camera each frame).
   // Dim + non-pickable while the lane is open / in its hold delay.
+  // keep_open Close stays fully active so the user can shut the lane.
   if (hasTriggers) {
-    const busy = lane.open
+    const busy = lane.open && !lane.keepOpen
     const btnW = Math.min(0.42, Math.max(0.28, pose.width * 0.42))
     const btnH = 0.14
     const y = pose.height + 0.22
@@ -1172,7 +1181,7 @@ export function createNativeStage(
     globalLed: LedConfig,
     theme: 'dark' | 'light',
   ) {
-    const sig = `${showDims}|${showGhost}|${placing}|${layout.edges.map((e) => `${e.id}:${e.left.toFixed(3)}:${e.right.toFixed(3)}`).join(',')}|${lanes.map((l) => `${l.id}:${l.name}:${l.open}${l.mode}${l.clearMm}:${l.entryPin ?? ''}:${l.exitPin ?? ''}`).join(',')}|${mode}|${focusLaneId ?? ''}|${hideLaneVolumes ? 1 : 0}|${globalFinish}|${globalLed.color}|${theme}|${layout.slots.map((s) => s.index).join(',')}`
+    const sig = `${showDims}|${showGhost}|${placing}|${layout.edges.map((e) => `${e.id}:${e.left.toFixed(3)}:${e.right.toFixed(3)}`).join(',')}|${lanes.map((l) => `${l.id}:${l.name}:${l.open}${l.keepOpen ? 'k' : ''}${l.mode}${l.clearMm}:${l.entryPin ?? ''}:${l.exitPin ?? ''}`).join(',')}|${mode}|${focusLaneId ?? ''}|${hideLaneVolumes ? 1 : 0}|${globalFinish}|${globalLed.color}|${theme}|${layout.slots.map((s) => s.index).join(',')}`
     if (sig === extraSig) {
       for (const child of extras.children) {
         if (!child.userData.lanePad || !child.userData.laneId) continue
