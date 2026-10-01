@@ -12,12 +12,14 @@ import { useCorridor } from '../store/corridor'
 import { useToast } from '../store/toast'
 import { apiErrorMessage } from '../api/client'
 import {
+  closeLane,
+  owningServerLaneId,
   serverLaneIdFromUnitId,
   triggerLaneEntry,
   triggerLaneExit,
 } from '../api/lane'
 import { buzz, whoosh } from '../lib/feedback'
-import { createNativeStage, type CameraInfo, type NativeStage } from './nativeStage'
+import { createNativeStage, STAGE_FLOOR_REV, type CameraInfo, type NativeStage } from './nativeStage'
 
 // Expo GL is not a full browser WebGL2; Three logs noisy but non-fatal shader notes.
 LogBox.ignoreLogs([
@@ -93,9 +95,22 @@ export function StageCanvas({ onMiss }: { onMiss: () => void }) {
     const st = useCorridor.getState()
     const lane = st.lanes.find((l) => l.id === laneId)
     if (dir === 'close') {
-      if (!lane?.open) return
-      whoosh()
-      st.setLaneOpen(laneId, false)
+      if (!lane?.open || !lane.keepOpen) return
+      const serverLaneId = owningServerLaneId(lane.members)
+      if (!serverLaneId) {
+        buzz()
+        useToast.getState().show('No server lane linked to this selection', 'error')
+        return
+      }
+      void closeLane(serverLaneId)
+        .then(() => {
+          whoosh()
+          st.setLaneOpen(laneId, false)
+        })
+        .catch((err) => {
+          buzz()
+          useToast.getState().show(apiErrorMessage(err), 'error')
+        })
       return
     }
     // Already open / in hold delay — ignore until the lane closes (unless keep_open Close).
@@ -122,7 +137,7 @@ export function StageCanvas({ onMiss }: { onMiss: () => void }) {
     void run
       .then(() => {
         whoosh()
-        if (unitId) st.activateOperateUnit(unitId)
+        if (unitId) st.activateOperateUnit(unitId, dir)
       })
       .catch((err) => {
         buzz()
@@ -260,6 +275,19 @@ export function StageCanvas({ onMiss }: { onMiss: () => void }) {
     return () => clearInterval(id)
   }, [])
 
+  // Remount Expo GL when the site floor look revision changes (HMR / updates).
+  useEffect(() => {
+    const { width, height } = size.current
+    if (width < 8 || height < 8) return
+    const nextKey = `${Math.round(width)}x${Math.round(height)}-f${STAGE_FLOOR_REV}`
+    if (nextKey === glKeyRef.current) return
+    stage.current?.dispose()
+    stage.current = null
+    glKeyRef.current = nextKey
+    setGlKey(nextKey)
+    setReady(true)
+  }, [STAGE_FLOOR_REV])
+
   const wheelProps = {
     onWheel: (e: { nativeEvent?: { deltaY?: number }; preventDefault?: () => void }) => {
       e.preventDefault?.()
@@ -332,7 +360,7 @@ export function StageCanvas({ onMiss }: { onMiss: () => void }) {
         scrollMid.current = height
         setStageH(height)
         // Expo GL drawing buffers often stick to the first size; remount on rotate/resize.
-        const nextKey = `${Math.round(width)}x${Math.round(height)}`
+        const nextKey = `${Math.round(width)}x${Math.round(height)}-f${STAGE_FLOOR_REV}`
         if (width > 0 && height > 0 && nextKey !== glKeyRef.current) {
           stage.current?.dispose()
           stage.current = null

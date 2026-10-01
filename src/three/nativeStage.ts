@@ -37,6 +37,10 @@ type WingRig = {
   node: THREE.Object3D
   closed: THREE.Quaternion
   open: THREE.Quaternion
+  /** Opposite swing used for exit on swing / accessible doors. */
+  openExit: THREE.Quaternion
+  /** Last non-zero open sense so close animates from the correct side. */
+  openSense: 1 | -1
   stroke: number
   frac: number
 }
@@ -75,6 +79,15 @@ function chaseTexture(): THREE.Texture {
   tex.needsUpdate = true
   return tex
 }
+
+/** World size of one ivory floor tile (metres). */
+const FLOOR_TILE_M = 0.6
+
+/** Real-site ivory floor — warm off-white (lighter than beige). */
+const FLOOR_IVORY = '#f0e6d4'
+
+/** Bump when floor look changes so StageCanvas remounts the GL view. */
+export const STAGE_FLOOR_REV = 16
 
 let CHASE_TEX: THREE.Texture | null = null
 const BUTTON_TEX = new Map<string, THREE.CanvasTexture | THREE.DataTexture>()
@@ -461,6 +474,32 @@ const WING_POSES: Record<string, { wing: WingId; closed: THREE.Quaternion; open:
   },
 }
 
+/** Negate rotation axis → opposite swing (entry vs exit for single-wing doors). */
+function oppositeOpen(q: THREE.Quaternion) {
+  return new THREE.Quaternion(-q.x, -q.y, -q.z, q.w)
+}
+
+function makeWingRig(
+  wing: WingId,
+  node: THREE.Object3D,
+  closed: THREE.Quaternion,
+  open: THREE.Quaternion,
+  stroke: number,
+  /** Only GL A1 swing columns mirror entry vs exit. */
+  mirrorExit: boolean,
+): WingRig {
+  return {
+    wing,
+    node,
+    closed: closed.clone(),
+    open: open.clone(),
+    openExit: mirrorExit ? oppositeOpen(open) : open.clone(),
+    openSense: 1,
+    stroke,
+    frac: 0,
+  }
+}
+
 function applyLed(mats: THREE.MeshStandardMaterial[], cfg: LedConfig, band: boolean, ledBase: Map<THREE.Material, number>) {
   const col = new THREE.Color(cfg.color)
   for (const m of mats) {
@@ -527,14 +566,7 @@ function buildPack(type: UnitType, scene: THREE.Group, _animations: THREE.Animat
               ? WING_POSES.GLA1_Wing_Glass
               : WING_POSES.HG02_Wing_Glass)
       o.setRotationFromQuaternion(pose.closed)
-      wings.push({
-        wing: pose.wing,
-        node: o,
-        closed: pose.closed.clone(),
-        open: pose.open.clone(),
-        stroke: map.stroke,
-        frac: 0,
-      })
+      wings.push(makeWingRig(pose.wing, o, pose.closed, pose.open, map.stroke, type === 'gla1'))
     } else if (MESH.arrowIn.test(n)) arrowIn.push(std)
     else if (MESH.arrowOut.test(n)) arrowOut.push(std)
   })
@@ -545,14 +577,7 @@ function buildPack(type: UnitType, scene: THREE.Group, _animations: THREE.Animat
     const existing = wings.find((w) => w.node === o || w.wing === pose.wing)
     if (existing) existing.node = o
     else {
-      wings.push({
-        wing: pose.wing,
-        node: o,
-        closed: pose.closed.clone(),
-        open: pose.open.clone(),
-        stroke: map.stroke,
-        frac: 0,
-      })
+      wings.push(makeWingRig(pose.wing, o, pose.closed, pose.open, map.stroke, type === 'gla1'))
     }
     o.setRotationFromQuaternion(pose.closed)
   })
@@ -976,6 +1001,8 @@ export function createNativeStage(
   const scene = new THREE.Scene()
   const bg = new THREE.Color('#14161b')
   scene.background = bg
+  let alive = true
+
   const camera = new THREE.PerspectiveCamera(42, 1, 0.05, 100)
   camera.position.set(3, 2.4, 5)
   const orbitTarget = new THREE.Vector3(0, 0.8, 0)
@@ -990,11 +1017,91 @@ export function createNativeStage(
   const fill = new THREE.DirectionalLight('#9fc4ff', 0.42)
   scene.add(ambient, hemi, key, fill)
 
-  const floorMat = new THREE.MeshStandardMaterial({ color: '#1c1f24', roughness: 0.72, metalness: 0 })
+  // Ivory ceramic/stone tiles with textured fields + soft grout (Expo GL shader).
+  const floorUvStub = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1)
+  floorUvStub.needsUpdate = true
+  const floorTileScale = new THREE.Vector2(34 / FLOOR_TILE_M, 40 / FLOOR_TILE_M)
+  let floorShader: { uniforms: Record<string, { value: unknown }> } | null = null
+  const floorMat = new THREE.MeshStandardMaterial({
+    color: FLOOR_IVORY,
+    map: floorUvStub,
+    roughness: 0.88,
+    metalness: 0,
+  })
+  floorMat.onBeforeCompile = (shader) => {
+    shader.uniforms.uTileScale = { value: floorTileScale }
+    floorShader = shader
+    shader.fragmentShader = shader.fragmentShader.replace(
+      'void main() {',
+      'uniform vec2 uTileScale;\nvoid main() {',
+    )
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <color_fragment>',
+      `#include <color_fragment>
+      {
+        // Soft ivory ceramic tiles with mottled fields (smooth, not blocky).
+        vec2 tUv = vMapUv * uTileScale;
+        vec2 cell = floor(tUv);
+        vec2 f = fract(tUv);
+
+        float edge = min(min(f.x, 1.0 - f.x), min(f.y, 1.0 - f.y));
+        float grout = smoothstep(0.0, 0.026, edge);
+
+        // Interpolated value noise → smooth mottling inside each tile field.
+        vec2 i0 = floor(tUv * 5.0);
+        vec2 i1 = floor(tUv * 14.0);
+        vec2 i2 = floor(tUv * 36.0);
+        vec2 f0 = fract(tUv * 5.0);
+        vec2 f1 = fract(tUv * 14.0);
+        vec2 f2 = fract(tUv * 36.0);
+        f0 = f0 * f0 * (3.0 - 2.0 * f0);
+        f1 = f1 * f1 * (3.0 - 2.0 * f1);
+        f2 = f2 * f2 * (3.0 - 2.0 * f2);
+        float a0 = fract(sin(dot(i0, vec2(127.1, 311.7))) * 43758.5453);
+        float b0 = fract(sin(dot(i0 + vec2(1.0, 0.0), vec2(127.1, 311.7))) * 43758.5453);
+        float c0 = fract(sin(dot(i0 + vec2(0.0, 1.0), vec2(127.1, 311.7))) * 43758.5453);
+        float d0 = fract(sin(dot(i0 + vec2(1.0, 1.0), vec2(127.1, 311.7))) * 43758.5453);
+        float n0 = mix(mix(a0, b0, f0.x), mix(c0, d0, f0.x), f0.y);
+        float a1 = fract(sin(dot(i1, vec2(269.5, 183.3))) * 43758.5453);
+        float b1 = fract(sin(dot(i1 + vec2(1.0, 0.0), vec2(269.5, 183.3))) * 43758.5453);
+        float c1 = fract(sin(dot(i1 + vec2(0.0, 1.0), vec2(269.5, 183.3))) * 43758.5453);
+        float d1 = fract(sin(dot(i1 + vec2(1.0, 1.0), vec2(269.5, 183.3))) * 43758.5453);
+        float n1 = mix(mix(a1, b1, f1.x), mix(c1, d1, f1.x), f1.y);
+        float a2 = fract(sin(dot(i2, vec2(12.9898, 78.233))) * 43758.5453);
+        float b2 = fract(sin(dot(i2 + vec2(1.0, 0.0), vec2(12.9898, 78.233))) * 43758.5453);
+        float c2 = fract(sin(dot(i2 + vec2(0.0, 1.0), vec2(12.9898, 78.233))) * 43758.5453);
+        float d2 = fract(sin(dot(i2 + vec2(1.0, 1.0), vec2(12.9898, 78.233))) * 43758.5453);
+        float n2 = mix(mix(a2, b2, f2.x), mix(c2, d2, f2.x), f2.y);
+        float tileHash = fract(sin(dot(cell, vec2(91.7, 53.1))) * 43758.5453);
+        float fine = fract(sin(dot(floor(tUv * 80.0), vec2(45.164, 97.431))) * 43758.5453);
+
+        float field =
+          0.78
+          + tileHash * 0.08
+          + n0 * 0.09
+          + n1 * 0.07
+          + n2 * 0.055
+          + fine * 0.04;
+
+        float tone = mix(0.7, field, grout);
+        diffuseColor.rgb *= tone;
+        diffuseColor.r *= 1.015;
+        diffuseColor.b *= 0.98;
+      }`,
+    )
+  }
+  floorMat.customProgramCacheKey = () => 'site-ivory-tiles-v6'
   const floor = new THREE.Mesh(new THREE.PlaneGeometry(34, 40), floorMat)
   floor.rotation.x = -Math.PI / 2
   floor.position.y = -0.001
+  floor.receiveShadow = false
   scene.add(floor)
+
+  const setFloorRepeat = (widthM: number, depthM: number) => {
+    floorTileScale.set(Math.max(widthM, 1) / FLOOR_TILE_M, Math.max(depthM, 1) / FLOOR_TILE_M)
+    const u = floorShader?.uniforms.uTileScale
+    if (u && u.value instanceof THREE.Vector2) u.value.copy(floorTileScale)
+  }
 
   const unitsRoot = new THREE.Group()
   const extras = new THREE.Group()
@@ -1017,7 +1124,6 @@ export function createNativeStage(
   let t0 = 0
   let dimSig = ''
   let extraSig = ''
-  let alive = true
   let raf = 0
 
   const ghostMesh = new THREE.Mesh(
@@ -1255,7 +1361,8 @@ export function createNativeStage(
     hemi.groundColor.set(theme === 'light' ? '#b6bcc5' : '#2a2d33')
     key.intensity = env.key
     fill.intensity = env.key * 0.35
-    floorMat.color.set(look.floor)
+    // Keep real-site ivory regardless of env grey presets.
+    floorMat.color.set(FLOOR_IVORY)
     bg.set(look.backdrop)
 
     const drag = useDrag.getState()
@@ -1286,12 +1393,14 @@ export function createNativeStage(
     const maxDepth = stageUnits.reduce((m, u) => Math.max(m, CATALOG[u.type].depthMm / 1000), 1)
 
     const fw = Math.max(layout.width + 30, 34)
+    const fd = 40
     floor.position.x = layout.centerX
     floor.position.z = layout.centerZ
     if (Math.abs((floor.geometry as THREE.PlaneGeometry).parameters.width - fw) > 0.5) {
       floor.geometry.dispose()
-      floor.geometry = new THREE.PlaneGeometry(fw, 40)
+      floor.geometry = new THREE.PlaneGeometry(fw, fd)
     }
+    setFloorRepeat(fw, fd)
 
     key.position.set(layout.centerX + 3, 5, layout.centerZ + 3)
     fill.position.set(layout.centerX - 3, 2, layout.centerZ - 3)
@@ -1333,11 +1442,24 @@ export function createNativeStage(
 
       for (const w of pack.wings) {
         const target = targets[`${u.id}:${w.wing}`] ?? 0
-        if (Math.abs(w.frac - target) > 1e-4) {
-          const step = dt / w.stroke
-          w.frac = target > w.frac ? Math.min(target, w.frac + step) : Math.max(target, w.frac - step)
+        // GL A1 only: entry/exit use opposite swings. Right-end columns face the
+        // lane on the left (flipped), so invert which pose is entry vs exit.
+        if (target !== 0 && u.type === 'gla1') {
+          const entrySense: 1 | -1 = wingSide(u, w.wing) === 'left' ? -1 : 1
+          w.openSense = (target < 0 ? -entrySense : entrySense) as 1 | -1
+        } else if (target !== 0) {
+          w.openSense = 1
         }
-        WING_Q.slerpQuaternions(w.closed, w.open, w.frac)
+        const fracTarget = Math.abs(target)
+        if (Math.abs(w.frac - fracTarget) > 1e-4) {
+          const step = dt / w.stroke
+          w.frac =
+            fracTarget > w.frac
+              ? Math.min(fracTarget, w.frac + step)
+              : Math.max(fracTarget, w.frac - step)
+        }
+        const openPose = u.type === 'gla1' && w.openSense < 0 ? w.openExit : w.open
+        WING_Q.slerpQuaternions(w.closed, openPose, w.frac)
         w.node.setRotationFromQuaternion(WING_Q)
       }
 
@@ -1513,6 +1635,9 @@ export function createNativeStage(
     dispose() {
       alive = false
       cancelAnimationFrame(raf)
+      floor.geometry.dispose()
+      floorUvStub.dispose()
+      floorMat.dispose()
       renderer.dispose()
       packs.clear()
     },

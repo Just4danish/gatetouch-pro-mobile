@@ -21,7 +21,7 @@ import { useTheme } from '../store/theme'
 import { useToast } from '../store/toast'
 import { colors } from '../theme/tokens'
 import { buzz, tap, whoosh } from '../lib/feedback'
-import { IconEdit, IconUser, IconUsers } from './Icons'
+import { IconEdit, IconEye, IconEyeOff, IconUser, IconUsers } from './Icons'
 
 type UsersListDialogProps = {
   open: boolean
@@ -70,6 +70,8 @@ export function UsersListDialog({ open, onClose }: UsersListDialogProps) {
   const [editing, setEditing] = useState<UserRow | null>(null)
   const [newPassword, setNewPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
+  const [showNewPassword, setShowNewPassword] = useState(false)
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false)
   const [editError, setEditError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
 
@@ -104,6 +106,8 @@ export function UsersListDialog({ open, onClose }: UsersListDialogProps) {
     setEditing(null)
     setNewPassword('')
     setConfirmPassword('')
+    setShowNewPassword(false)
+    setShowConfirmPassword(false)
     setEditError(null)
   }
 
@@ -112,6 +116,8 @@ export function UsersListDialog({ open, onClose }: UsersListDialogProps) {
     setEditing(user)
     setNewPassword('')
     setConfirmPassword('')
+    setShowNewPassword(false)
+    setShowConfirmPassword(false)
     setEditError(null)
   }
 
@@ -252,38 +258,82 @@ export function UsersListDialog({ open, onClose }: UsersListDialogProps) {
             </Text>
 
             <Text style={[styles.inputLabel, { color: c.text3 }]}>New password</Text>
-            <TextInput
-              value={newPassword}
-              onChangeText={setNewPassword}
+            <View
               style={[
-                styles.input,
-                { color: c.text, backgroundColor: c.glass2, borderColor: c.hair },
+                styles.pwRow,
+                { backgroundColor: c.glass2, borderColor: c.hair },
               ]}
-              placeholder="Enter new password"
-              placeholderTextColor={c.text3}
-              secureTextEntry
-              autoCapitalize="none"
-              autoCorrect={false}
-              editable={!saving}
-              testID="app.users.password.new"
-            />
+            >
+              <TextInput
+                value={newPassword}
+                onChangeText={setNewPassword}
+                style={[styles.pwInput, { color: c.text }]}
+                placeholder="Enter new password"
+                placeholderTextColor={c.text3}
+                secureTextEntry={!showNewPassword}
+                autoCapitalize="none"
+                autoCorrect={false}
+                editable={!saving}
+                testID="app.users.password.new"
+              />
+              <Pressable
+                style={styles.eyeBtn}
+                testID="app.users.password.new.toggle"
+                accessibilityRole="button"
+                accessibilityLabel={showNewPassword ? 'Hide password' : 'Show password'}
+                hitSlop={8}
+                onPress={() => {
+                  tap()
+                  setShowNewPassword((v) => !v)
+                }}
+              >
+                {showNewPassword ? (
+                  <IconEyeOff color={c.text2} size={18} />
+                ) : (
+                  <IconEye color={c.text2} size={18} />
+                )}
+              </Pressable>
+            </View>
 
             <Text style={[styles.inputLabel, { color: c.text3 }]}>Confirm password</Text>
-            <TextInput
-              value={confirmPassword}
-              onChangeText={setConfirmPassword}
+            <View
               style={[
-                styles.input,
-                { color: c.text, backgroundColor: c.glass2, borderColor: c.hair },
+                styles.pwRow,
+                { backgroundColor: c.glass2, borderColor: c.hair },
               ]}
-              placeholder="Re-enter password"
-              placeholderTextColor={c.text3}
-              secureTextEntry
-              autoCapitalize="none"
-              autoCorrect={false}
-              editable={!saving}
-              testID="app.users.password.confirm"
-            />
+            >
+              <TextInput
+                value={confirmPassword}
+                onChangeText={setConfirmPassword}
+                style={[styles.pwInput, { color: c.text }]}
+                placeholder="Re-enter password"
+                placeholderTextColor={c.text3}
+                secureTextEntry={!showConfirmPassword}
+                autoCapitalize="none"
+                autoCorrect={false}
+                editable={!saving}
+                testID="app.users.password.confirm"
+              />
+              <Pressable
+                style={styles.eyeBtn}
+                testID="app.users.password.confirm.toggle"
+                accessibilityRole="button"
+                accessibilityLabel={
+                  showConfirmPassword ? 'Hide confirm password' : 'Show confirm password'
+                }
+                hitSlop={8}
+                onPress={() => {
+                  tap()
+                  setShowConfirmPassword((v) => !v)
+                }}
+              >
+                {showConfirmPassword ? (
+                  <IconEyeOff color={c.text2} size={18} />
+                ) : (
+                  <IconEye color={c.text2} size={18} />
+                )}
+              </Pressable>
+            </View>
 
             {editError ? (
               <Text style={[styles.error, { color: c.redFg }]} testID="app.users.password.error">
@@ -556,13 +606,30 @@ const styles = StyleSheet.create({
     marginBottom: 4,
     marginTop: 6,
   },
-  input: {
+  pwRow: {
     minHeight: 40,
     borderRadius: 10,
     borderWidth: StyleSheet.hairlineWidth,
-    paddingHorizontal: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingLeft: 12,
+    paddingRight: 4,
+  },
+  pwInput: {
+    flex: 1,
+    minWidth: 0,
+    minHeight: 40,
+    paddingVertical: 0,
+    paddingRight: 6,
     fontSize: 14,
     fontWeight: '600',
+  },
+  eyeBtn: {
+    width: 36,
+    height: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
   },
   editActions: {
     flexDirection: 'row',

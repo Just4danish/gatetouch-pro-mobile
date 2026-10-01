@@ -72,6 +72,11 @@ export interface Lane {
   /** runtime state, never part of undo history */
   open: boolean
   openedAt: number | null
+  /**
+   * Which trigger opened the lane. Swing / accessible gates use the opposite
+   * door pose for exit vs entry. Cleared when closed.
+   */
+  openDir?: 'entry' | 'exit' | null
   mode: LaneMode
   direction: LaneDirection
   accessible: boolean
@@ -237,7 +242,8 @@ interface State extends Doc {
   setOperateUnitId: (id: string | null) => void
   /** Focus a lane pad so Allow entry shows; opens that lane when confirmed. */
   setOperateLaneFocus: (laneId: string) => void
-  activateOperateUnit: (id: string) => void
+  /** Open focused/related lanes after Allow entry or exit (dir picks swing side). */
+  activateOperateUnit: (id: string, dir?: 'entry' | 'exit') => void
   clearOperateFocus: () => void
 
   /* geometry */
@@ -407,6 +413,7 @@ function baseLane(members: WingRef[], i: number, groupId?: string): Lane {
     members,
     open: false,
     openedAt: null,
+    openDir: null,
     mode: 'badge',
     direction: 'both',
     accessible: false,
@@ -1149,18 +1156,19 @@ export const useCorridor = create<State>((set, get) => {
       set({ operateUnitId: unitId, operateLaneId: laneId, operateActiveUnitId: null })
     },
 
-    activateOperateUnit: (id) =>
+    activateOperateUnit: (id, dir = 'entry') =>
       set((s) => {
         const related = s.operateLaneId
           ? new Set([s.operateLaneId])
           : new Set(lanesOfUnit(s.lanes, id).map((l) => l.id))
         const now = Date.now()
+        const openDir: 'entry' | 'exit' = dir === 'exit' ? 'exit' : 'entry'
         const lanes = s.lanes.map((l) => {
           if (!related.has(l.id)) return l
           if (l.mode === 'locked' || l.mode === 'noentry') return l
           // keep_open: stay open until the user presses Close (no auto-close timer).
           if (l.keepOpen) {
-            return { ...l, open: true, openedAt: null }
+            return { ...l, open: true, openedAt: null, openDir }
           }
           // Match lane-card open: badge mode gets a holdSec auto-close timer.
           if (l.mode === 'badge') {
@@ -1168,10 +1176,11 @@ export const useCorridor = create<State>((set, get) => {
               ...l,
               open: true,
               openedAt: now,
+              openDir,
               holdSec: Number.isFinite(l.holdSec) && l.holdSec > 0 ? l.holdSec : 5,
             }
           }
-          return { ...l, open: true, openedAt: null }
+          return { ...l, open: true, openedAt: null, openDir }
         })
         return { operateUnitId: id, operateActiveUnitId: id, lanes }
       }),
@@ -1265,7 +1274,7 @@ export const useCorridor = create<State>((set, get) => {
       edit((s) => ({
         lanes: s.lanes.map((l) =>
           l.id === id
-            ? { ...l, mode, open: mode === 'free' ? l.open : false, openedAt: null }
+            ? { ...l, mode, open: mode === 'free' ? l.open : false, openedAt: null, openDir: mode === 'free' ? l.openDir : null }
             : l,
         ),
       })),
@@ -1329,35 +1338,52 @@ export const useCorridor = create<State>((set, get) => {
         lanes: s.lanes.map((l) => {
           if (l.id !== id) return l
           if (l.mode === 'locked' || l.mode === 'noentry') return l
-          if (l.open) return { ...l, open: false, openedAt: null }
-          if (l.keepOpen) return { ...l, open: true, openedAt: null }
-          return { ...l, open: true, openedAt: l.mode === 'badge' ? Date.now() : null }
+          if (l.open) return { ...l, open: false, openedAt: null, openDir: null }
+          if (l.keepOpen) return { ...l, open: true, openedAt: null, openDir: 'entry' as const }
+          return {
+            ...l,
+            open: true,
+            openedAt: l.mode === 'badge' ? Date.now() : null,
+            openDir: 'entry' as const,
+          }
         }),
       })),
 
     setLaneOpen: (id, open) =>
       set((s) => ({
-        lanes: s.lanes.map((l) => (l.id === id ? { ...l, open, openedAt: null } : l)),
+        lanes: s.lanes.map((l) =>
+          l.id === id
+            ? { ...l, open, openedAt: null, openDir: open ? (l.openDir ?? 'entry') : null }
+            : l,
+        ),
       })),
 
     openAll: () =>
       set((s) => ({
         alarmKind: null,
         lanes: s.lanes.map((l) =>
-          l.mode === 'locked' || l.mode === 'noentry' ? l : { ...l, open: true, openedAt: null },
+          l.mode === 'locked' || l.mode === 'noentry'
+            ? l
+            : { ...l, open: true, openedAt: null, openDir: 'entry' as const },
         ),
       })),
 
     closeAll: () =>
       set((s) => ({
         alarmKind: null,
-        lanes: s.lanes.map((l) => ({ ...l, open: false, openedAt: null })),
+        lanes: s.lanes.map((l) => ({ ...l, open: false, openedAt: null, openDir: null })),
       })),
 
     emergencyRelease: () =>
       set((s) => ({
         alarmKind: null,
-        lanes: s.lanes.map((l) => ({ ...l, open: true, openedAt: null, mode: 'free' as LaneMode })),
+        lanes: s.lanes.map((l) => ({
+          ...l,
+          open: true,
+          openedAt: null,
+          openDir: 'entry' as const,
+          mode: 'free' as LaneMode,
+        })),
       })),
 
     applyAlarmOpen: (kind) =>
@@ -1367,7 +1393,7 @@ export const useCorridor = create<State>((set, get) => {
           alarmKind: kind,
           lanes: s.lanes.map((l) => {
             if (gid && l.groupId && l.groupId !== gid) return l
-            return { ...l, open: true, openedAt: null }
+            return { ...l, open: true, openedAt: null, openDir: 'entry' as const }
           }),
         }
       }),
@@ -1379,7 +1405,7 @@ export const useCorridor = create<State>((set, get) => {
           alarmKind: null,
           lanes: s.lanes.map((l) => {
             if (gid && l.groupId && l.groupId !== gid) return l
-            return { ...l, open: false, openedAt: null }
+            return { ...l, open: false, openedAt: null, openDir: null }
           }),
         }
       }),
@@ -1394,7 +1420,9 @@ export const useCorridor = create<State>((set, get) => {
         return now - l.openedAt > holdSec * 1000
       }
       if (!s.lanes.some(expired)) return
-      const lanes = s.lanes.map((l) => (expired(l) ? { ...l, open: false, openedAt: null } : l))
+      const lanes = s.lanes.map((l) =>
+        expired(l) ? { ...l, open: false, openedAt: null, openDir: null } : l,
+      )
       // When Allow-entry lanes finish their hold, leave the focused ops view.
       let operateActiveUnitId = s.operateActiveUnitId
       if (operateActiveUnitId) {
@@ -1721,11 +1749,14 @@ function defaultOrResolvedGap(
   return Math.max(lo, Math.min(maxGapMm(left, right), defaultGapMm(left, right)))
 }
 
-/** open fraction target per wing key `${unitId}:${wing}` */
+/** open fraction target per wing key `${unitId}:${wing}`
+ *  +1 = entry / default open pose, −1 = exit (opposite swing for swing gates), 0 = closed.
+ */
 export function wingTargets(lanes: Lane[]): Record<string, number> {
   const map: Record<string, number> = {}
   for (const lane of lanes) {
-    for (const m of lane.members) map[`${m.unitId}:${m.wing}`] = lane.open ? 1 : 0
+    const sense = !lane.open ? 0 : lane.openDir === 'exit' ? -1 : 1
+    for (const m of lane.members) map[`${m.unitId}:${m.wing}`] = sense
   }
   return map
 }

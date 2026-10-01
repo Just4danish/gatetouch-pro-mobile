@@ -20,6 +20,7 @@ export type ChangeHotspotInput = {
 export type ChangeHotspotResponse = {
   message?: string
   ssid?: string
+  password?: string
   visibility?: HotspotVisibility
 }
 
@@ -29,7 +30,7 @@ const PATH = '/api/hotspot/change/'
  * PATCH /api/hotspot/change/
  * Always sends `visibility: "hidden"` — never accept a caller-supplied value.
  */
-export const changeHotspot = (input: ChangeHotspotInput) => {
+export const changeHotspot = async (input: ChangeHotspotInput) => {
   const body: ChangeHotspotBody = {
     ssid: input.ssid.trim(),
     password: input.password,

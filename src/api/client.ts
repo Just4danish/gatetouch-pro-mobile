@@ -1,7 +1,7 @@
 import { clearSession, getToken } from '../lib/authStorage'
 import { notifyAuthInvalid } from './authEvents'
 
-const baseURL = (process.env.EXPO_PUBLIC_API_URL || 'http://192.168.50.1:8000').replace(/\/$/, '')
+const baseURL = (process.env.EXPO_PUBLIC_API_URL || 'http://192.168.1.20:8000').replace(/\/$/, '')
 
 export class ApiError extends Error {
   status: number

@@ -112,12 +112,39 @@ export type TriggerLaneResponse = {
   direction?: string
 }
 
-export const triggerLaneEntry = async (id: string | number, body: TriggerLaneBody = {}) => {
-  return api.patch<TriggerLaneResponse>(`${PATH}${id}/trigger/entry/`, body)
+export type TriggerLaneOptions = {
+  /** One-shot hold-open: query `?keep_open=true` on the trigger URL. */
+  keepOpen?: boolean
 }
 
-export const triggerLaneExit = async (id: string | number, body: TriggerLaneBody = {}) => {
-  return api.patch<TriggerLaneResponse>(`${PATH}${id}/trigger/exit/`, body)
+function triggerLaneUrl(
+  id: string | number,
+  direction: 'entry' | 'exit',
+  opts?: TriggerLaneOptions,
+) {
+  const q = opts?.keepOpen ? '?keep_open=true' : ''
+  return `${PATH}${id}/trigger/${direction}/${q}`
+}
+
+export const triggerLaneEntry = async (
+  id: string | number,
+  body: TriggerLaneBody = {},
+  opts?: TriggerLaneOptions,
+) => {
+  return api.patch<TriggerLaneResponse>(triggerLaneUrl(id, 'entry', opts), body)
+}
+
+export const triggerLaneExit = async (
+  id: string | number,
+  body: TriggerLaneBody = {},
+  opts?: TriggerLaneOptions,
+) => {
+  return api.patch<TriggerLaneResponse>(triggerLaneUrl(id, 'exit', opts), body)
+}
+
+/** Manual close for keep_open lanes (GPIO off / barrier shut). */
+export const closeLane = async (id: string | number, body: TriggerLaneBody = {}) => {
+  return api.patch<TriggerLaneResponse>(`${PATH}${id}/close/`, body)
 }
 
 /** Unit ids from hydrate look like `srv_{laneId}_{index}`. */

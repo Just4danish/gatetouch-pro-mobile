@@ -31,6 +31,7 @@ import { tap, thud, whoosh, buzz } from '../lib/feedback'
 import { landscapeSideDockWidth, STAGE_CHROME_TOP } from '../lib/stageFrame'
 import { apiErrorMessage } from '../api/client'
 import {
+  closeLane,
   hasDistinctExitPin,
   normalizePin,
   owningServerLaneId,
@@ -252,11 +253,13 @@ export function ChromeDrawer({
   const alarmKind = useCorridor((s) => s.alarmKind)
   const activateOperateUnit = useCorridor((s) => s.activateOperateUnit)
   const setLaneOpen = useCorridor((s) => s.setLaneOpen)
+  const setLaneKeepOpenByServerId = useCorridor((s) => s.setLaneKeepOpenByServerId)
   const showToast = useToast((s) => s.show)
   const c = colors(theme)
   const u = makeUiStyles(c)
   const [usersOpen, setUsersOpen] = useState(false)
   const [accountMenuOpen, setAccountMenuOpen] = useState(false)
+  const [allowMenu, setAllowMenu] = useState<'entry' | 'exit' | null>(null)
   const [adminPwOpen, setAdminPwOpen] = useState(false)
   const [adminPwNew, setAdminPwNew] = useState('')
   const [adminPwConfirm, setAdminPwConfirm] = useState('')
@@ -294,7 +297,7 @@ export function ChromeDrawer({
   const alarmCount = (showEmergencyAlarm ? 1 : 0) + (showFireAlarm ? 1 : 0)
   const alarmClusterW =
     alarmCount > 0 ? alarmCount * ALARM + (alarmCount - 1) * ALARM_GAP : 0
-  const [triggering, setTriggering] = useState<'entry' | 'exit' | null>(null)
+  const [triggering, setTriggering] = useState<'entry' | 'exit' | 'close' | null>(null)
   const [confirmAlarm, setConfirmAlarm] = useState<AlarmConfirm | null>(null)
   const [triggeringAlarm, setTriggeringAlarm] = useState(false)
 
@@ -534,6 +537,7 @@ export function ChromeDrawer({
 
   const onAllowTrigger = (dir: 'entry' | 'exit') => {
     if (!operateUnitId || triggering || laneTriggerBusy) return
+    setAllowMenu(null)
     const serverLaneId = resolveServerLaneId()
     if (!serverLaneId) {
       buzz()
@@ -546,7 +550,58 @@ export function ChromeDrawer({
     void run
       .then(() => {
         whoosh()
-        activateOperateUnit(operateUnitId)
+        activateOperateUnit(operateUnitId, dir)
+        setOpen(false)
+      })
+      .catch((err) => {
+        buzz()
+        showToast(apiErrorMessage(err), 'error')
+      })
+      .finally(() => {
+        setTriggering(null)
+      })
+  }
+
+  const onAllowMenuAction = (dir: 'entry' | 'exit', action: 'keepOpen' | 'close') => {
+    if (!operateUnitId || triggering) return
+    setAllowMenu(null)
+    const serverLaneId = resolveServerLaneId()
+    if (!serverLaneId) {
+      buzz()
+      showToast('No server lane linked to this selection', 'error')
+      return
+    }
+
+    if (action === 'keepOpen') {
+      setTriggering(dir)
+      const run =
+        dir === 'exit'
+          ? triggerLaneExit(serverLaneId, {}, { keepOpen: true })
+          : triggerLaneEntry(serverLaneId, {}, { keepOpen: true })
+      void run
+        .then(() => {
+          whoosh()
+          // Session hold-open so chrome swaps to Close until the barrier is shut.
+          setLaneKeepOpenByServerId(serverLaneId, true)
+          activateOperateUnit(operateUnitId, dir)
+          setOpen(false)
+        })
+        .catch((err) => {
+          buzz()
+          showToast(apiErrorMessage(err), 'error')
+        })
+        .finally(() => {
+          setTriggering(null)
+        })
+      return
+    }
+
+    const laneId = focusedOperateLane?.id
+    setTriggering('close')
+    void closeLane(serverLaneId)
+      .then(() => {
+        whoosh()
+        if (laneId) setLaneOpen(laneId, false)
         setOpen(false)
       })
       .catch((err) => {
@@ -559,10 +614,29 @@ export function ChromeDrawer({
   }
 
   const onCloseKeepOpenLane = () => {
-    if (!focusedOperateLane?.open || !focusedOperateLane.keepOpen) return
-    whoosh()
-    setLaneOpen(focusedOperateLane.id, false)
-    setOpen(false)
+    if (!focusedOperateLane?.open || !focusedOperateLane.keepOpen || triggering) return
+    setAllowMenu(null)
+    const serverLaneId =
+      owningServerLaneId(focusedOperateLane.members) ?? resolveServerLaneId()
+    if (!serverLaneId) {
+      buzz()
+      showToast('No server lane linked to this selection', 'error')
+      return
+    }
+    setTriggering('close')
+    void closeLane(serverLaneId)
+      .then(() => {
+        whoosh()
+        setLaneOpen(focusedOperateLane.id, false)
+        setOpen(false)
+      })
+      .catch((err) => {
+        buzz()
+        showToast(apiErrorMessage(err), 'error')
+      })
+      .finally(() => {
+        setTriggering(null)
+      })
   }
 
   const orientRef = useRef(landscape)
@@ -606,6 +680,7 @@ export function ChromeDrawer({
 
   const close = () => {
     setAccountMenuOpen(false)
+    setAllowMenu(null)
     setAdminPwOpen(false)
     setHotspotOpen(false)
     setSiteNameEditing(false)
@@ -616,6 +691,7 @@ export function ChromeDrawer({
     setOpen((v) => {
       if (v) {
         setAccountMenuOpen(false)
+        setAllowMenu(null)
         setAdminPwOpen(false)
         setHotspotOpen(false)
         setSiteNameEditing(false)
@@ -1531,10 +1607,13 @@ export function ChromeDrawer({
                   borderColor: c.red,
                   borderWidth: 2,
                 },
+                triggering === 'close' && { opacity: 0.45 },
               ]}
               testID="operate.closeLane"
               accessibilityRole="button"
               accessibilityLabel="Close lane"
+              accessibilityState={{ disabled: !!triggering }}
+              disabled={!!triggering}
               onPress={() => {
                 tap()
                 onCloseKeepOpenLane()
@@ -1548,71 +1627,155 @@ export function ChromeDrawer({
                 }}
                 numberOfLines={1}
               >
-                Close
+                {triggering === 'close' ? '…' : 'Close'}
               </Text>
             </Pressable>
           )}
           {showAllowEntry && (
-            <Pressable
-              style={[
-                styles.allowEntry,
-                {
-                  backgroundColor: triggerFill,
-                  borderColor: triggerBlue,
-                  borderWidth: 2,
-                },
-                (triggering === 'entry' || laneTriggerBusy) && { opacity: 0.45 },
-              ]}
-              testID="operate.allowEntry"
-              accessibilityRole="button"
-              accessibilityLabel="Allow entry"
-              accessibilityState={{ disabled: !!triggering || laneTriggerBusy }}
-              disabled={!!triggering || laneTriggerBusy}
-              onPress={() => onAllowTrigger('entry')}
-            >
-              <Text
-                style={{
-                  color: triggerGreen,
-                  fontSize: 13,
-                  fontWeight: '700',
+            <View style={styles.allowBtnWrap}>
+              <Pressable
+                style={[
+                  styles.allowEntry,
+                  {
+                    backgroundColor: triggerFill,
+                    borderColor: triggerBlue,
+                    borderWidth: 2,
+                  },
+                  (triggering === 'entry' || laneTriggerBusy) && { opacity: 0.45 },
+                ]}
+                testID="operate.allowEntry"
+                accessibilityRole="button"
+                accessibilityLabel="Allow entry"
+                accessibilityHint="Long press for Keep open or Close"
+                accessibilityState={{ disabled: !!triggering || laneTriggerBusy }}
+                disabled={!!triggering || laneTriggerBusy}
+                onPress={() => onAllowTrigger('entry')}
+                onLongPress={() => {
+                  if (triggering || laneTriggerBusy) return
+                  tap()
+                  setAllowMenu((m) => (m === 'entry' ? null : 'entry'))
                 }}
-                numberOfLines={1}
+                delayLongPress={380}
               >
-                {triggering === 'entry' ? '…' : 'Allow entry'}
-              </Text>
-            </Pressable>
+                <Text
+                  style={{
+                    color: triggerGreen,
+                    fontSize: 13,
+                    fontWeight: '700',
+                  }}
+                  numberOfLines={1}
+                >
+                  {triggering === 'entry' ? '…' : 'Allow entry'}
+                </Text>
+              </Pressable>
+              {allowMenu === 'entry' && (
+                <View
+                  style={[
+                    styles.allowMenu,
+                    { backgroundColor: c.menu, borderColor: c.hair },
+                  ]}
+                  testID="operate.allowEntry.menu"
+                >
+                  <Pressable
+                    style={styles.allowMenuItem}
+                    testID="operate.allowEntry.keepOpen"
+                    accessibilityRole="button"
+                    accessibilityLabel="Keep open"
+                    onPress={() => onAllowMenuAction('entry', 'keepOpen')}
+                  >
+                    <Text style={[styles.allowMenuText, { color: c.text }]}>Keep open</Text>
+                  </Pressable>
+                  <View style={[styles.allowMenuDivider, { backgroundColor: c.hair }]} />
+                  <Pressable
+                    style={styles.allowMenuItem}
+                    testID="operate.allowEntry.close"
+                    accessibilityRole="button"
+                    accessibilityLabel="Close"
+                    onPress={() => onAllowMenuAction('entry', 'close')}
+                  >
+                    <Text style={[styles.allowMenuText, { color: c.redFg }]}>Close</Text>
+                  </Pressable>
+                </View>
+              )}
+            </View>
           )}
           {showAllowExit && (
-            <Pressable
-              style={[
-                styles.allowEntry,
-                {
-                  backgroundColor: triggerFill,
-                  borderColor: triggerBlue,
-                  borderWidth: 2,
-                },
-                (triggering === 'exit' || laneTriggerBusy) && { opacity: 0.45 },
-              ]}
-              testID="operate.allowExit"
-              accessibilityRole="button"
-              accessibilityLabel="Allow exit"
-              accessibilityState={{ disabled: !!triggering || laneTriggerBusy }}
-              disabled={!!triggering || laneTriggerBusy}
-              onPress={() => onAllowTrigger('exit')}
-            >
-              <Text
-                style={{
-                  color: triggerBlue,
-                  fontSize: 13,
-                  fontWeight: '700',
+            <View style={styles.allowBtnWrap}>
+              <Pressable
+                style={[
+                  styles.allowEntry,
+                  {
+                    backgroundColor: triggerFill,
+                    borderColor: triggerBlue,
+                    borderWidth: 2,
+                  },
+                  (triggering === 'exit' || laneTriggerBusy) && { opacity: 0.45 },
+                ]}
+                testID="operate.allowExit"
+                accessibilityRole="button"
+                accessibilityLabel="Allow exit"
+                accessibilityHint="Long press for Keep open or Close"
+                accessibilityState={{ disabled: !!triggering || laneTriggerBusy }}
+                disabled={!!triggering || laneTriggerBusy}
+                onPress={() => onAllowTrigger('exit')}
+                onLongPress={() => {
+                  if (triggering || laneTriggerBusy) return
+                  tap()
+                  setAllowMenu((m) => (m === 'exit' ? null : 'exit'))
                 }}
-                numberOfLines={1}
+                delayLongPress={380}
               >
-                {triggering === 'exit' ? '…' : 'Allow exit'}
-              </Text>
-            </Pressable>
+                <Text
+                  style={{
+                    color: triggerBlue,
+                    fontSize: 13,
+                    fontWeight: '700',
+                  }}
+                  numberOfLines={1}
+                >
+                  {triggering === 'exit' ? '…' : 'Allow exit'}
+                </Text>
+              </Pressable>
+              {allowMenu === 'exit' && (
+                <View
+                  style={[
+                    styles.allowMenu,
+                    { backgroundColor: c.menu, borderColor: c.hair },
+                  ]}
+                  testID="operate.allowExit.menu"
+                >
+                  <Pressable
+                    style={styles.allowMenuItem}
+                    testID="operate.allowExit.keepOpen"
+                    accessibilityRole="button"
+                    accessibilityLabel="Keep open"
+                    onPress={() => onAllowMenuAction('exit', 'keepOpen')}
+                  >
+                    <Text style={[styles.allowMenuText, { color: c.text }]}>Keep open</Text>
+                  </Pressable>
+                  <View style={[styles.allowMenuDivider, { backgroundColor: c.hair }]} />
+                  <Pressable
+                    style={styles.allowMenuItem}
+                    testID="operate.allowExit.close"
+                    accessibilityRole="button"
+                    accessibilityLabel="Close"
+                    onPress={() => onAllowMenuAction('exit', 'close')}
+                  >
+                    <Text style={[styles.allowMenuText, { color: c.redFg }]}>Close</Text>
+                  </Pressable>
+                </View>
+              )}
+            </View>
           )}
         </View>
+      )}
+
+      {allowMenu != null && (
+        <Pressable
+          style={styles.allowMenuDismiss}
+          accessibilityLabel="Dismiss allow menu"
+          onPress={() => setAllowMenu(null)}
+        />
       )}
 
       <GestureDetector gesture={gearGesture}>
@@ -2055,6 +2218,10 @@ const styles = StyleSheet.create({
     gap: ALLOW_GAP,
     zIndex: 22,
   },
+  allowBtnWrap: {
+    position: 'relative',
+    zIndex: 23,
+  },
   allowEntry: {
     minWidth: ALLOW_W,
     height: ALLOW_H,
@@ -2068,6 +2235,39 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.14,
     shadowRadius: 3,
     shadowOffset: { width: 0, height: 1 },
+  },
+  allowMenu: {
+    position: 'absolute',
+    top: ALLOW_H + 6,
+    left: 0,
+    minWidth: ALLOW_W,
+    borderRadius: 10,
+    borderWidth: StyleSheet.hairlineWidth,
+    paddingVertical: 4,
+    elevation: 8,
+    shadowColor: '#000',
+    shadowOpacity: 0.22,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 3 },
+    zIndex: 30,
+  },
+  allowMenuItem: {
+    minHeight: 34,
+    paddingHorizontal: 12,
+    justifyContent: 'center',
+  },
+  allowMenuText: {
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  allowMenuDivider: {
+    height: StyleSheet.hairlineWidth,
+    marginVertical: 2,
+    marginHorizontal: 8,
+  },
+  allowMenuDismiss: {
+    ...StyleSheet.absoluteFill,
+    zIndex: 21,
   },
   alarmRow: {
     position: 'absolute',

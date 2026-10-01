@@ -1,11 +1,19 @@
 import { useEffect, useRef, useState } from 'react'
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import Svg, { Circle } from 'react-native-svg'
-import { lanesOfUnit, useCorridor } from '../store/corridor'
+import { lanesOfUnit, useCorridor, type Lane } from '../store/corridor'
 import { useAuth } from '../store/auth'
 import { hasPermission } from '../auth/permissions'
 import { colors } from '../theme/tokens'
 import { useTheme } from '../store/theme'
+import { useToast } from '../store/toast'
+import { apiErrorMessage } from '../api/client'
+import {
+  closeLane,
+  owningServerLaneId,
+  triggerLaneEntry,
+  triggerLaneExit,
+} from '../api/lane'
 import { makeUiStyles } from './uiStyles'
 import { buzz, tap, thud, whoosh } from '../lib/feedback'
 import { CATALOG } from '../model/catalog'
@@ -80,9 +88,8 @@ export function OperatePanel() {
   const units = useCorridor((s) => s.units)
   const activeGroupId = useCorridor((s) => s.activeGroupId)
   const laneGroups = useCorridor((s) => s.laneGroups)
-  const requestLane = useCorridor((s) => s.requestLane)
-  const openAll = useCorridor((s) => s.openAll)
-  const closeAll = useCorridor((s) => s.closeAll)
+  // const openAllLocal = useCorridor((s) => s.openAll)
+  // const closeAllLocal = useCorridor((s) => s.closeAll)
   const select = useCorridor((s) => s.select)
   const setMode = useCorridor((s) => s.setMode)
   const selectLaneGroup = useCorridor((s) => s.selectLaneGroup)
@@ -91,14 +98,19 @@ export function OperatePanel() {
   const operateActiveUnitId = useCorridor((s) => s.operateActiveUnitId)
   const operateLaneId = useCorridor((s) => s.operateLaneId)
   const setOperateLaneFocus = useCorridor((s) => s.setOperateLaneFocus)
-  const setLaneMode = useCorridor((s) => s.setLaneMode)
-  const setLaneDirection = useCorridor((s) => s.setLaneDirection)
+  const activateOperateUnit = useCorridor((s) => s.activateOperateUnit)
+  const setLaneOpen = useCorridor((s) => s.setLaneOpen)
+  // const setLaneMode = useCorridor((s) => s.setLaneMode)
+  // const setLaneDirection = useCorridor((s) => s.setLaneDirection)
+  const showToast = useToast((s) => s.show)
   const role = useAuth((s) => s.role)
   const canTriggerLane = hasPermission(role, 'TRIGGER_LANE')
-  const canCloseLane = hasPermission(role, 'CLOSE_LANE')
+  // const canCloseLane = hasPermission(role, 'CLOSE_LANE')
   const canManageBuild = hasPermission(role, 'CREATE_RESOURCES')
   const now = useLaneTicker()
   const [pickingGroup, setPickingGroup] = useState(false)
+  const [busyLaneId, setBusyLaneId] = useState<string | null>(null)
+  // const [bulkBusy, setBulkBusy] = useState(false)
   const pickerBooted = useRef(false)
 
   const activeGroup = laneGroups.find((g) => g.id === activeGroupId)
@@ -106,6 +118,119 @@ export function OperatePanel() {
   const focusUnit = operateActiveUnitId ? units.find((x) => x.id === operateActiveUnitId) : undefined
   const focusedLanes = operateActiveUnitId ? lanesOfUnit(groupLanes, operateActiveUnitId) : []
   const shownLanes = focusUnit ? focusedLanes : groupLanes
+  const laneActionBusy = busyLaneId != null
+
+  const triggerDirForLane = (lane: Lane): 'entry' | 'exit' =>
+    lane.direction === 'out' ? 'exit' : 'entry'
+
+  const openLaneViaApi = async (lane: Lane) => {
+    const serverLaneId = owningServerLaneId(lane.members)
+    if (!serverLaneId) {
+      buzz()
+      showToast('No server lane linked to this selection', 'error')
+      return false
+    }
+    const dir = triggerDirForLane(lane)
+    if (dir === 'exit') await triggerLaneExit(serverLaneId)
+    else await triggerLaneEntry(serverLaneId)
+    setOperateLaneFocus(lane.id)
+    const unitId = lane.members[0]?.unitId
+    if (unitId) activateOperateUnit(unitId, dir)
+    else setLaneOpen(lane.id, true)
+    return true
+  }
+
+  const closeLaneViaApi = async (lane: Lane) => {
+    const serverLaneId = owningServerLaneId(lane.members)
+    if (!serverLaneId) {
+      buzz()
+      showToast('No server lane linked to this selection', 'error')
+      return false
+    }
+    await closeLane(serverLaneId)
+    setLaneOpen(lane.id, false)
+    return true
+  }
+
+  const onLanePress = (lane: Lane) => {
+    setOperateLaneFocus(lane.id)
+    if (!canTriggerLane) {
+      buzz()
+      return
+    }
+    if (laneActionBusy) return
+    const blocked = lane.mode === 'locked' || lane.mode === 'noentry'
+    if (blocked) {
+      buzz()
+      return
+    }
+
+    setBusyLaneId(lane.id)
+    const run = lane.open ? closeLaneViaApi(lane) : openLaneViaApi(lane)
+    void run
+      .then((ok) => {
+        if (!ok) return
+        if (lane.open) thud()
+        else whoosh()
+      })
+      .catch((err) => {
+        buzz()
+        showToast(apiErrorMessage(err), 'error')
+      })
+      .finally(() => {
+        setBusyLaneId(null)
+      })
+  }
+
+  // const onOpenAll = () => {
+  //   if (!canTriggerLane || laneActionBusy) return
+  //   const targets = groupLanes.filter(
+  //     (l) => !l.open && l.mode !== 'locked' && l.mode !== 'noentry',
+  //   )
+  //   if (!targets.length) {
+  //     whoosh()
+  //     openAllLocal()
+  //     return
+  //   }
+  //   setBulkBusy(true)
+  //   void Promise.allSettled(targets.map((l) => openLaneViaApi(l)))
+  //     .then((results) => {
+  //       const failed = results.find((r) => r.status === 'rejected')
+  //       if (failed && failed.status === 'rejected') {
+  //         buzz()
+  //         showToast(apiErrorMessage(failed.reason), 'error')
+  //       } else {
+  //         whoosh()
+  //       }
+  //     })
+  //     .finally(() => {
+  //       setBulkBusy(false)
+  //     })
+  // }
+
+  // const onCloseAll = () => {
+  //   if (!canCloseLane || laneActionBusy) return
+  //   const targets = groupLanes.filter((l) => l.open)
+  //   if (!targets.length) {
+  //     thud()
+  //     closeAllLocal()
+  //     return
+  //   }
+  //   setBulkBusy(true)
+  //   void Promise.allSettled(targets.map((l) => closeLaneViaApi(l)))
+  //     .then((results) => {
+  //       const failed = results.find((r) => r.status === 'rejected')
+  //       if (failed && failed.status === 'rejected') {
+  //         buzz()
+  //         showToast(apiErrorMessage(failed.reason), 'error')
+  //       } else {
+  //         thud()
+  //       }
+  //     })
+  //     .finally(() => {
+  //       setBulkBusy(false)
+  //     })
+  // }
 
   useEffect(() => {
     if (!activeGroupId) setPickingGroup(true)
@@ -320,32 +445,32 @@ export function OperatePanel() {
       ) : (
         <View style={u.row}>
           <Text style={[u.sectionTitle, { flex: 1 }]}>Lanes</Text>
+          {/* Open all / Close all hidden for now.
           {canCloseLane ? (
             <Pressable
-              style={u.ghostBtn}
+              style={[u.ghostBtn, laneActionBusy && { opacity: 0.45 }]}
               testID="operate.lanes.closeAll"
               accessibilityLabel="Close all lanes"
-              onPress={() => {
-                thud()
-                closeAll()
-              }}
+              accessibilityState={{ disabled: laneActionBusy }}
+              disabled={laneActionBusy}
+              onPress={onCloseAll}
             >
-              <Text style={u.ghostText}>Close all</Text>
+              <Text style={u.ghostText}>{bulkBusy ? '…' : 'Close all'}</Text>
             </Pressable>
           ) : null}
           {canTriggerLane ? (
             <Pressable
-              style={u.ghostBtn}
+              style={[u.ghostBtn, laneActionBusy && { opacity: 0.45 }]}
               testID="operate.lanes.openAll"
               accessibilityLabel="Open all lanes"
-              onPress={() => {
-                whoosh()
-                openAll()
-              }}
+              accessibilityState={{ disabled: laneActionBusy }}
+              disabled={laneActionBusy}
+              onPress={onOpenAll}
             >
-              <Text style={u.ghostText}>Open all</Text>
+              <Text style={u.ghostText}>{bulkBusy ? '…' : 'Open all'}</Text>
             </Pressable>
           ) : null}
+          */}
         </View>
       )}
 
@@ -376,21 +501,13 @@ export function OperatePanel() {
                       : c.tintRedBg,
                   borderWidth: selected ? 2 : 1,
                 },
+                busyLaneId === l.id && { opacity: 0.55 },
               ]}
               testID={`operate.lane.${l.id}`}
               accessibilityLabel={l.name}
-              accessibilityState={{ selected }}
-              onPress={() => {
-                setOperateLaneFocus(l.id)
-                if (!canTriggerLane) {
-                  buzz()
-                  return
-                }
-                if (blocked) buzz()
-                else if (l.open) thud()
-                else whoosh()
-                requestLane(l.id)
-              }}
+              accessibilityState={{ selected, disabled: laneActionBusy }}
+              disabled={laneActionBusy}
+              onPress={() => onLanePress(l)}
               onLongPress={() => select({ kind: 'lane', id: l.id })}
             >
               <View style={[styles.laneDot, { backgroundColor: l.color }]} />
@@ -419,6 +536,7 @@ export function OperatePanel() {
               >
                 {blocked ? MODE_LABEL[l.mode].toUpperCase() : l.open ? 'OPEN' : 'CLOSED'}
               </Text>
+              {/* Mode / direction summary + editors hidden for now.
               <Text style={{ color: c.text2, fontSize: 12, marginTop: 4 }}>
                 {MODE_LABEL[l.mode]} ·{' '}
                 {l.direction === 'both' ? '↔ bidirectional' : l.direction === 'in' ? 'Entry →' : '← Exit'}
@@ -475,6 +593,7 @@ export function OperatePanel() {
                   </View>
                 </View>
               )}
+              */}
             </Pressable>
           )
         })}
